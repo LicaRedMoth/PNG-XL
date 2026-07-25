@@ -71,9 +71,13 @@ jobs:
         working-directory: ffmpeg-src
         run: |
           set -euo pipefail
+          # --disable-autodetect keeps the build reproducible, but it also turns
+          # off zlib -- and FFmpeg's png/apng codecs require it, so they would be
+          # silently dropped and the round-trip below would have no source
+          # decoder. Ask for zlib explicitly.
           PKG_CONFIG_PATH="$GITHUB_WORKSPACE/_inst/lib/pkgconfig" ./configure \
             --enable-libpxl --disable-everything --disable-x86asm \
-            --disable-doc --disable-autodetect \
+            --disable-doc --disable-autodetect --enable-zlib \
             --enable-protocol=file \
             --enable-decoder=png,apng,libpxl,libpxl_anim \
             --enable-encoder=png,apng,libpxl,libpxl_anim \
@@ -81,6 +85,14 @@ jobs:
             --enable-muxer=image2,apng,apxl,md5,rawvideo \
             --enable-filter=null
           make -j"$(nproc)"
+
+          # A missing codec would otherwise surface as a confusing failure in a
+          # later step rather than here, where the cause is obvious.
+          for c in png apng libpxl libpxl_anim; do
+              ./ffmpeg -hide_banner -loglevel error -decoders 2>/dev/null \
+                  | grep -qE "^ ?[A-Z.]+ $c( |\$)" || {
+                  echo "error: decoder $c was not built" >&2; exit 1; }
+          done
 
       # libpxlcore is a shared library in a staging prefix the dynamic loader
       # knows nothing about, so every ffmpeg invocation below needs it on the
