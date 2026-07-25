@@ -86,17 +86,10 @@ jobs:
             --enable-filter=null
           make -j"$(nproc)"
 
-          # A missing codec would otherwise surface as a confusing failure in a
-          # later step rather than here, where the cause is obvious.
-          for c in png apng libpxl libpxl_anim; do
-              ./ffmpeg -hide_banner -loglevel error -decoders 2>/dev/null \
-                  | grep -qE "^ ?[A-Z.]+ $c( |\$)" || {
-                  echo "error: decoder $c was not built" >&2; exit 1; }
-          done
-
       # libpxlcore is a shared library in a staging prefix the dynamic loader
       # knows nothing about, so every ffmpeg invocation below needs it on the
-      # path or it dies before parsing its arguments.
+      # path or it dies before parsing its arguments -- printing nothing, which
+      # makes any grep over its output fail for the wrong reason.
       - name: Export the library path
         run: echo "LD_LIBRARY_PATH=$PWD/_inst/lib" >> "$GITHUB_ENV"
 
@@ -106,6 +99,15 @@ jobs:
           set -euo pipefail
           ./ffmpeg -hide_banner -codecs 2>/dev/null | grep -E ' (pxl|pxl_anim) '
           ./ffmpeg -hide_banner -formats 2>/dev/null | grep -E ' apxl '
+
+          # Everything the round-trips need must actually exist. Without this a
+          # dropped codec surfaces two steps later as an opaque I/O error --
+          # which is exactly how the first run of this workflow failed.
+          ./ffmpeg -hide_banner -decoders 2>/dev/null > /tmp/decoders.txt
+          for c in png apng libpxl libpxl_anim; do
+              grep -qE "^ ?[A-Z.]+ $c( |\$)" /tmp/decoders.txt || {
+                  echo "error: decoder $c was not built" >&2; exit 1; }
+          done
 
       # The patch applying is necessary but not sufficient -- a silently changed
       # API can compile and still produce wrong pixels. Compare bytes.
