@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -111,7 +111,14 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+          # Name what is committed rather than `git add -A`. The vendored trees
+          # and VERSIONS.json are the whole change; a blanket add would sweep up
+          # anything else the build happened to leave behind, which is how build
+          # artifacts got committed here once before.
+          git add VERSIONS.json
+          git add -- "libpng-${{ steps.latest.outputs.png_ver }}" \
+                     "zstd-${{ steps.latest.outputs.zstd_ver }}" 2>/dev/null || true
+          git add -u   # stage deletions of the superseded vendored directories
           git commit -m "chore: bump libpng ${{ steps.latest.outputs.png_ver }} / zstd ${{ steps.latest.outputs.zstd_ver }}, rebuild pxl"
           git push
 
