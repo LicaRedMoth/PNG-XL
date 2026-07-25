@@ -80,7 +80,7 @@ jobs:
             --disable-doc --disable-autodetect --enable-zlib \
             --enable-protocol=file \
             --enable-decoder=png,apng,libpxl,libpxl_anim \
-            --enable-encoder=png,apng,libpxl,libpxl_anim \
+            --enable-encoder=png,apng,libpxl,libpxl_anim,rawvideo \
             --enable-demuxer=image2,png_pipe,apng,apxl,pxl_pipe \
             --enable-muxer=image2,apng,apxl,md5,rawvideo \
             --enable-filter=null
@@ -104,9 +104,17 @@ jobs:
           # dropped codec surfaces two steps later as an opaque I/O error --
           # which is exactly how the first run of this workflow failed.
           ./ffmpeg -hide_banner -decoders 2>/dev/null > /tmp/decoders.txt
+          ./ffmpeg -hide_banner -encoders 2>/dev/null > /tmp/encoders.txt
           for c in png apng libpxl libpxl_anim; do
               grep -qE "^ ?[A-Z.]+ $c( |\$)" /tmp/decoders.txt || {
                   echo "error: decoder $c was not built" >&2; exit 1; }
+          done
+          # rawvideo is how the round-trips dump pixels for comparison; its
+          # encoder is a separate switch from its muxer, which is why it went
+          # missing once already.
+          for c in png apng libpxl libpxl_anim rawvideo; do
+              grep -qE "^ ?[A-Z.]+ $c( |\$)" /tmp/encoders.txt || {
+                  echo "error: encoder $c was not built" >&2; exit 1; }
           done
 
       # The patch applying is necessary but not sufficient -- a silently changed
@@ -137,8 +145,15 @@ jobs:
         run: |
           set -euo pipefail
           # Color properties must match decoding the source directly.
-          ./ffmpeg -hide_banner -i "$SRC" -f null - 2>&1 | grep 'Stream #' | tee /tmp/props_src.txt
-          ./ffmpeg -hide_banner -i /tmp/out.pxl -f null - 2>&1 | grep 'Stream #' | tee /tmp/props_pxl.txt
+          #
+          # Probe with no output at all rather than `-f null -`: the null muxer
+          # is not in this minimal build, so ffmpeg would exit non-zero after
+          # printing the stream line we want, and pipefail would fail the step
+          # over a diagnostic that already succeeded. Without an output file
+          # ffmpeg also exits non-zero by design, hence the explicit `|| true` --
+          # the grep that follows is what actually decides the outcome.
+          ./ffmpeg -hide_banner -i "$SRC" 2>&1 | grep 'Stream #' | tee /tmp/props_src.txt || true
+          ./ffmpeg -hide_banner -i /tmp/out.pxl 2>&1 | grep 'Stream #' | tee /tmp/props_pxl.txt || true
           src_fmt="$(grep -o 'rgb24([^)]*)' /tmp/props_src.txt)"
           pxl_fmt="$(grep -o 'rgb24([^)]*)' /tmp/props_pxl.txt)"
           echo "source: $src_fmt"
@@ -211,5 +226,7 @@ jobs:
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else
-            gh issue create --title "$title" --body "$body" --label ffmpeg
+            # No --label: a label that does not exist in the repository makes
+            # gh fail, which would lose the report this step exists to deliver.
+            gh issue create --title "$title" --body "$body"
           fi
