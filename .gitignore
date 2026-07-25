@@ -1,0 +1,26 @@
+/build/
+/build-vendored/
+/build-asan/
+# Staging prefixes used to point FFmpeg's pkg-config at a local libpxl build
+/_inst/
+/_inst_asan/
+*.o
+*.a
+*.so
+# Scratch encodes from development. The committed reference files under
+# tests/data/ are exceptions: the suite decodes them to prove an older
+# encoder's output still reads correctly.
+*.pxl
+*.apxl
+!tests/data/*.pxl
+!tests/data/*.apxl
+pxl_interop_tmp.png
+
+# Reference implementations / vendored upstreams (own repos, not part of our build)
+/Zpng/
+/FFmpeg/
+/apngasm/
+/apngdis-bin/
+
+# Large local test assets (kept out of the repo; referenced by path)
+/4YOU/

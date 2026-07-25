@@ -1,0 +1,107 @@
+name: ci
+
+# Build and test on every push / pull request. The rebuild-on-upstream workflow
+# only fires on a schedule and only when libpng or zstd changes, so this is what
+# actually guards ordinary code changes.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: system deps
+            vendored: "OFF"
+          - name: vendored deps
+            vendored: "ON"
+    name: build (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+                                  libpng-dev libzstd-dev zlib1g-dev
+
+      - name: Configure
+        run: cmake -B build -DPXL_VENDORED=${{ matrix.vendored }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify install and out-of-tree consumer
+        if: matrix.vendored == 'OFF'
+        run: |
+          set -euo pipefail
+          cmake --install build --prefix "$PWD/_inst"
+          # libpxlcore must be usable with zstd alone (no libpng) -- this is the
+          # surface a future ffmpeg codec or WASM build links against.
+          cat > /tmp/consumer.c <<'EOF'
+          #include <pxl.h>
+          #include <pxl_format.h>
+          #include <apxl.h>
+          #include <apxl_format.h>
+          #include <stdio.h>
+          int main(void) { printf("libpxlcore %s\n", pxl_version()); return 0; }
+          EOF
+          cc -I"$PWD/_inst/include" /tmp/consumer.c -o /tmp/consumer \
+             -L"$PWD/_inst/lib" -lpxlcore -Wl,-rpath,"$PWD/_inst/lib" -lzstd
+          /tmp/consumer
+
+      # FFmpeg's configure locates libpxl with require_pkg_config, so a broken
+      # or non-relocatable .pc silently breaks --enable-libpxl. Build the same
+      # consumer using only pkg-config output to prove the metadata is usable.
+      - name: Verify pkg-config metadata
+        if: matrix.vendored == 'OFF'
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PWD/_inst/lib/pkgconfig"
+          pkg-config --exists libpxlcore libpxl
+          test "$(pkg-config --modversion libpxlcore)" = "$(pkg-config --modversion libpxl)"
+          cc /tmp/consumer.c -o /tmp/consumer_pc \
+             $(pkg-config --cflags --libs libpxlcore) -Wl,-rpath,"$PWD/_inst/lib"
+          /tmp/consumer_pc
+
+  sanitizers:
+    name: decoder fuzz (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+                                  libpng-dev libzstd-dev zlib1g-dev
+
+      # Decoders run on untrusted input, so they get a sanitized soak. This is
+      # the check that caught a heap overflow (BCIF filter byte paired with a
+      # geometry BCIF does not support) and a frame-buffer leak in apng_load.
+      - name: Configure with sanitizers
+        run: cmake -B build-asan -DPXL_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-asan -j
+
+      - name: Fuzz decoders
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./build-asan/pxl_fuzz_decode 300000
+
+      - name: Round-trip suite under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure

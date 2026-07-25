@@ -1,0 +1,125 @@
+name: rebuild-on-upstream
+
+# Watches upstream libpng (pnggroup/libpng) and zstd (facebook/zstd) releases.
+# When either has a newer stable release than the version pinned in
+# VERSIONS.json, it vendors the new source, rebuilds pxltool, runs the
+# round-trip test, and (on success) commits the bump. On test failure it opens
+# an issue instead of committing.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"   # daily at 05:17 UTC (off the top of the hour)
+  workflow_dispatch: {}      # allow manual runs
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check-and-rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake zlib1g-dev jq
+
+      - name: Resolve latest upstream stable releases
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Latest non-prerelease tag, stripped of a leading "v" / "zstd-" / "libpng-".
+          latest_release() {
+            local repo="$1"
+            gh api "repos/$repo/releases" --jq \
+              '[.[] | select(.prerelease==false and .draft==false)][0].tag_name'
+          }
+
+          png_tag="$(latest_release pnggroup/libpng || true)"
+          zstd_tag="$(latest_release facebook/zstd || true)"
+
+          # Normalize to bare versions, e.g. v1.6.60 -> 1.6.60, zstd-1.5.8 -> 1.5.8.
+          norm() { echo "$1" | sed -E 's/^(v|zstd-|libpng-)//'; }
+          png_ver="$(norm "$png_tag")"
+          zstd_ver="$(norm "$zstd_tag")"
+
+          echo "png_tag=$png_tag"   >> "$GITHUB_OUTPUT"
+          echo "zstd_tag=$zstd_tag" >> "$GITHUB_OUTPUT"
+          echo "png_ver=$png_ver"   >> "$GITHUB_OUTPUT"
+          echo "zstd_ver=$zstd_ver" >> "$GITHUB_OUTPUT"
+
+          cur_png="$(jq -r .libpng VERSIONS.json)"
+          cur_zstd="$(jq -r .zstd  VERSIONS.json)"
+          echo "cur_png=$cur_png"   >> "$GITHUB_OUTPUT"
+          echo "cur_zstd=$cur_zstd" >> "$GITHUB_OUTPUT"
+
+          changed=false
+          [ -n "$png_ver" ]  && [ "$png_ver"  != "$cur_png"  ] && changed=true
+          [ -n "$zstd_ver" ] && [ "$zstd_ver" != "$cur_zstd" ] && changed=true
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "libpng: $cur_png -> $png_ver   zstd: $cur_zstd -> $zstd_ver   changed=$changed"
+
+      - name: Fetch new sources
+        if: steps.latest.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          png_ver="${{ steps.latest.outputs.png_ver }}"
+          zstd_ver="${{ steps.latest.outputs.zstd_ver }}"
+
+          if [ "$png_ver" != "${{ steps.latest.outputs.cur_png }}" ] && [ -n "$png_ver" ]; then
+            rm -rf libpng-*/
+            curl -fsSL "https://github.com/pnggroup/libpng/archive/refs/tags/${{ steps.latest.outputs.png_tag }}.tar.gz" -o png.tgz
+            tar xzf png.tgz && rm png.tgz
+            # Ensure the dir is named libpng-<ver> as the build expects.
+            mv libpng-* "libpng-$png_ver" 2>/dev/null || true
+          fi
+
+          if [ "$zstd_ver" != "${{ steps.latest.outputs.cur_zstd }}" ] && [ -n "$zstd_ver" ]; then
+            rm -rf zstd-*/
+            curl -fsSL "https://github.com/facebook/zstd/archive/refs/tags/${{ steps.latest.outputs.zstd_tag }}.tar.gz" -o zstd.tgz
+            tar xzf zstd.tgz && rm zstd.tgz
+            mv zstd-* "zstd-$zstd_ver" 2>/dev/null || true
+          fi
+
+      - name: Build (vendored) and test
+        if: steps.latest.outputs.changed == 'true'
+        id: build
+        run: |
+          set -euo pipefail
+          png_ver="${{ steps.latest.outputs.png_ver }}"
+          zstd_ver="${{ steps.latest.outputs.zstd_ver }}"
+          cmake -B build -DPXL_VENDORED=ON \
+            -DPXL_PNG_DIR="$PWD/libpng-$png_ver" \
+            -DPXL_ZSTD_DIR="$PWD/zstd-$zstd_ver"
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+
+      - name: Update VERSIONS.json and commit
+        if: steps.latest.outputs.changed == 'true' && steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+          jq --arg png "${{ steps.latest.outputs.png_ver }}" \
+             --arg zstd "${{ steps.latest.outputs.zstd_ver }}" \
+             '.libpng=$png | .zstd=$zstd' VERSIONS.json > VERSIONS.tmp
+          mv VERSIONS.tmp VERSIONS.json
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: bump libpng ${{ steps.latest.outputs.png_ver }} / zstd ${{ steps.latest.outputs.zstd_ver }}, rebuild pxl"
+          git push
+
+      - name: Open issue on build failure
+        if: failure() && steps.latest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Automated rebuild failed for libpng ${{ steps.latest.outputs.png_ver }} / zstd ${{ steps.latest.outputs.zstd_ver }}" \
+            --body "The scheduled upstream rebuild failed. See run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

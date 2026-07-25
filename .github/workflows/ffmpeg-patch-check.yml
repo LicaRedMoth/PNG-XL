@@ -1,0 +1,201 @@
+name: ffmpeg-patch-check
+
+# ffmpeg/0001-register-pxl-in-ffmpeg.patch edits registration points in ten
+# FFmpeg files (codec IDs, descriptors, both Makefiles, configure, allcodecs,
+# allformats, img2 tables). Upstream churns those files constantly, so the patch
+# rots on its own -- nothing in our repository changes, yet one day it stops
+# applying.
+#
+# This watches FFmpeg master and proves the whole module still works: patch
+# applies, configure finds libpxl through pkg-config, everything links, and a
+# real image and animation round-trip bit-exact through the built binary. On
+# failure it opens an issue (or comments on the open one) instead of failing
+# silently on a schedule nobody reads.
+
+on:
+  schedule:
+    - cron: "43 4 * * 1"   # weekly, Monday 04:43 UTC (off the hour)
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "ffmpeg/**"        # verify immediately when the module itself changes
+      - ".github/workflows/ffmpeg-patch-check.yml"
+  pull_request:
+    paths:
+      - "ffmpeg/**"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  patch-applies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+                                  libpng-dev libzstd-dev zlib1g-dev jq git
+
+      # libpxl must be installed first: FFmpeg's configure locates it with
+      # require_pkg_config, so this also re-tests the .pc metadata.
+      - name: Build and install libpxl
+        run: |
+          set -euo pipefail
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+          cmake --install build --prefix "$PWD/_inst"
+
+      # Shallow clone of master: we care whether the patch applies to what
+      # upstream looks like *today*, not to the pinned commit.
+      - name: Clone FFmpeg master
+        id: ffmpeg
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+          rev="$(git -C ffmpeg-src rev-parse --short HEAD)"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "pinned=$(jq -r .ffmpeg_verified VERSIONS.json)" >> "$GITHUB_OUTPUT"
+          echo "FFmpeg master is $rev (last verified: $(jq -r .ffmpeg_verified VERSIONS.json))"
+
+      - name: Apply the module
+        run: ./ffmpeg/apply.sh "$PWD/ffmpeg-src"
+
+      # --disable-everything keeps the build to minutes rather than an hour. The
+      # enables are exactly what the round-trip below needs: our codecs, plus
+      # PNG/APNG to produce and compare against.
+      - name: Configure and build FFmpeg
+        working-directory: ffmpeg-src
+        run: |
+          set -euo pipefail
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/_inst/lib/pkgconfig" ./configure \
+            --enable-libpxl --disable-everything --disable-x86asm \
+            --disable-doc --disable-autodetect \
+            --enable-protocol=file \
+            --enable-decoder=png,apng,libpxl,libpxl_anim \
+            --enable-encoder=png,apng,libpxl,libpxl_anim \
+            --enable-demuxer=image2,png_pipe,apng,apxl,pxl_pipe \
+            --enable-muxer=image2,apng,apxl,md5,rawvideo \
+            --enable-filter=null
+          make -j"$(nproc)"
+
+      # libpxlcore is a shared library in a staging prefix the dynamic loader
+      # knows nothing about, so every ffmpeg invocation below needs it on the
+      # path or it dies before parsing its arguments.
+      - name: Export the library path
+        run: echo "LD_LIBRARY_PATH=$PWD/_inst/lib" >> "$GITHUB_ENV"
+
+      - name: Verify the codecs are registered
+        working-directory: ffmpeg-src
+        run: |
+          set -euo pipefail
+          ./ffmpeg -hide_banner -codecs 2>/dev/null | grep -E ' (pxl|pxl_anim) '
+          ./ffmpeg -hide_banner -formats 2>/dev/null | grep -E ' apxl '
+
+      # The patch applying is necessary but not sufficient -- a silently changed
+      # API can compile and still produce wrong pixels. Compare bytes.
+      - name: Still image round-trips bit-exact
+        working-directory: ffmpeg-src
+        env:
+          SRC: ${{ github.workspace }}/tests/data/RGB_24bits_palette_color_test_chart.png
+        run: |
+          set -euo pipefail
+          ./ffmpeg -hide_banner -loglevel error -y -i "$SRC" -c:v libpxl /tmp/out.pxl
+          ./ffmpeg -hide_banner -loglevel error -y -i "$SRC" -f rawvideo /tmp/ref.raw
+          ./ffmpeg -hide_banner -loglevel error -y -i /tmp/out.pxl -f rawvideo /tmp/dec.raw
+          cmp /tmp/ref.raw /tmp/dec.raw
+          echo "still: bit-exact"
+          # Our own tool must read what FFmpeg wrote.
+          "$GITHUB_WORKSPACE/_inst/bin/pxltool" info /tmp/out.pxl
+
+      # Metadata rides on FFmpeg-internal APIs (ff_exif_get_buffer,
+      # ff_decode_exif_attach_buffer), which are far more likely to shift under us
+      # than the public ones. Compare against what a plain PNG -> PNG conversion
+      # produces: that isolates our handling from FFmpeg's own IFD normalization,
+      # which legitimately rewrites the tags.
+      - name: Metadata survives the round trip
+        working-directory: ffmpeg-src
+        env:
+          SRC: ${{ github.workspace }}/tests/data/RGB_24bits_palette_color_test_chart.png
+        run: |
+          set -euo pipefail
+          # Color properties must match decoding the source directly.
+          ./ffmpeg -hide_banner -i "$SRC" -f null - 2>&1 | grep 'Stream #' | tee /tmp/props_src.txt
+          ./ffmpeg -hide_banner -i /tmp/out.pxl -f null - 2>&1 | grep 'Stream #' | tee /tmp/props_pxl.txt
+          src_fmt="$(grep -o 'rgb24([^)]*)' /tmp/props_src.txt)"
+          pxl_fmt="$(grep -o 'rgb24([^)]*)' /tmp/props_pxl.txt)"
+          echo "source: $src_fmt"
+          echo "pxl:    $pxl_fmt"
+          test "$src_fmt" = "$pxl_fmt"
+
+          # eXIf: compare the pxl path against the direct PNG path.
+          ./ffmpeg -hide_banner -loglevel error -y -i "$SRC" /tmp/direct.png
+          ./ffmpeg -hide_banner -loglevel error -y -i /tmp/out.pxl /tmp/viapxl.png
+          python3 - <<'PY'
+          import struct, sys
+          def chunks(path):
+              d = open(path, 'rb').read(); pos = 8; out = {}
+              while pos + 8 <= len(d):
+                  ln = struct.unpack('>I', d[pos:pos+4])[0]
+                  out.setdefault(d[pos+4:pos+8], d[pos+8:pos+8+ln])
+                  pos += 12 + ln
+              return out
+          a, b = chunks('/tmp/direct.png'), chunks('/tmp/viapxl.png')
+          for t in (b'eXIf', b'gAMA', b'cHRM'):
+              if t in a and a[t] != b.get(t):
+                  sys.exit(f"{t.decode()} differs: direct {len(a[t])}B vs via-pxl "
+                           f"{len(b.get(t, b''))}B")
+          print("metadata: matches the direct PNG path")
+          PY
+
+      - name: Animation round-trips bit-exact with timing preserved
+        working-directory: ffmpeg-src
+        env:
+          SRC: ${{ github.workspace }}/tests/data/Animated_PNG_example_bouncing_beach_ball.apng
+        run: |
+          set -euo pipefail
+          ./ffmpeg -hide_banner -loglevel error -y -i "$SRC" -c:v libpxl_anim /tmp/out.apxl
+          # -fps_mode passthrough: .apxl carries a per-frame delay like APNG, so
+          # without it FFmpeg resamples to a constant rate and duplicates frames.
+          ./ffmpeg -hide_banner -loglevel error -y -i "$SRC" -fps_mode passthrough -f rawvideo /tmp/aref.raw
+          ./ffmpeg -hide_banner -loglevel error -y -i /tmp/out.apxl -fps_mode passthrough -f rawvideo /tmp/adec.raw
+          cmp /tmp/aref.raw /tmp/adec.raw
+          echo "animation: every frame bit-exact"
+          "$GITHUB_WORKSPACE/_inst/bin/pxltool" ainfo /tmp/out.apxl
+
+      - name: Record the verified revision
+        if: success() && github.event_name == 'schedule'
+        run: |
+          echo "FFmpeg ${{ steps.ffmpeg.outputs.rev }} verified OK." >> "$GITHUB_STEP_SUMMARY"
+          echo "VERSIONS.json still pins ${{ steps.ffmpeg.outputs.pinned }}; bump it when convenient." >> "$GITHUB_STEP_SUMMARY"
+
+      # One issue, reused. A weekly job that opens a fresh issue every run buries
+      # the signal it exists to deliver.
+      - name: Report breakage
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REV: ${{ steps.ffmpeg.outputs.rev }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="FFmpeg module broken against upstream master"
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')"
+          body="The FFmpeg module failed against upstream master \`$REV\` (last verified: \`${{ steps.ffmpeg.outputs.pinned }}\`).
+
+          Run: $RUN
+
+          Likely causes, in order of how often they happen:
+          - upstream edited one of the ten registration points, so the patch no longer applies -- regenerate it;
+          - a libavcodec/libavformat API changed under the wrapper;
+          - pixel output actually differs, which is a real bug in the module.
+
+          The format itself is unaffected: nothing in the PXL build depends on \`ffmpeg/\`."
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label ffmpeg
+          fi

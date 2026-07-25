@@ -1,0 +1,258 @@
+# PXL — PNG XL
+
+A small lossless image format and library that pairs **libpng** (for reading and
+writing real PNG files) with **Zstandard** (as the compressor). It is a modern
+re-implementation of the idea behind [Zpng](https://github.com/catid/Zpng):
+filter the pixels with a reversible color transform, then compress the result
+with zstd instead of DEFLATE. On photographic content the `.pxl` file is
+typically ~65–70% of the equivalent PNG.
+
+`libpxl` exposes a clean C ABI so it can back editor plugins (GIMP, Krita) and
+thumbnailers (Dolphin, Windows) later.
+
+## How it works
+
+1. **Load** the source image with libpng into tightly packed pixels.
+2. **Filter** — the encoder tries several reversible filters and keeps whichever
+   compresses smallest:
+   - *delta*: subtract each channel from the pixel to its left (from Zpng);
+   - *BCIF* (8-bit RGB/RGBA): the color transform `y=b, u=g−b, v=g−r` plus a
+     split into separate color planes (from Zpng);
+   - *adaptive*: PNG-style per-row filters (None/Sub/Up/Average/Paeth), choosing
+     the best predictor for each row — this matches or beats PNG's own filtering
+     while still feeding zstd instead of DEFLATE.
+3. **Compress** the filtered bytes with `ZSTD_compress`.
+
+Decoding reverses these steps. All filters are exactly reversible, so `.pxl` is
+lossless.
+
+## File format
+
+A 24-byte little-endian header, an optional metadata block, then one zstd frame:
+
+| offset | size | field |
+|-------:|-----:|-------|
+| 0  | 4 | magic `"PXL1"` |
+| 4  | 1 | version (=1) |
+| 5  | 1 | channels (1–4) |
+| 6  | 1 | bytes per channel (1 or 2) |
+| 7  | 1 | color filter (0 delta, 1 BCIF, 2 adaptive) |
+| 8  | 4 | width (uint32) |
+| 12 | 4 | height (uint32) |
+| 16 | 4 | raw byte count |
+| 20 | 4 | metadata byte count |
+| 24 | … | metadata block, then zstd frame |
+
+## Metadata (EXIF, ICC, HDR, text)
+
+Ancillary PNG chunks are preserved byte-for-byte across a round-trip: `eXIf`
+(EXIF), `iCCP` (ICC color profile), `cICP` (HDR / BT.2100 signalling), `gAMA`,
+`cHRM`, `sRGB`, `pHYs`, `tIME`, `tEXt`/`zTXt`/`iTXt`, and any unknown ancillary
+chunk. They are stored in the metadata block and re-inserted when decoding back
+to PNG.
+
+This holds for animation too: an `.apxl` carries one metadata block for the whole
+file, filled from the source APNG and written back out by `da`.
+
+Chunks that describe the *original* pixel layout — `PLTE`, `tRNS`, `sBIT`,
+`bKGD`, `hIST` — are intentionally **not** carried over, because PXL
+canonicalizes palette / transparency / sub-8-bit images into real G/GA/RGB/RGBA
+channels, which would make those chunks invalid. Neither are the animation
+control chunks `acTL`/`fcTL`/`fdAT`: they are structural in the way `IDAT` is,
+carrying the frames and their sequence numbers, which the encoder regenerates.
+
+Through the FFmpeg module the picture is narrower, bounded by what FFmpeg itself
+models: EXIF and color information map to frame side data and color properties in
+both directions, while chunks it has no representation for stay in the file
+without being surfaced. [`ffmpeg/README.md`](ffmpeg/README.md) has the table.
+
+## Build
+
+Requires a C99 compiler, CMake ≥ 3.10, and libpng + zstd.
+
+```sh
+cmake -B build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+The suite covers lossless round-trips at every bit depth, PNG and APNG interop,
+progressive streaming, and a malformed-input fuzz pass over the decoders. It also
+runs on real files from [`tests/data/`](tests/data/README.md) — a public-domain
+PNG and APNG, plus `.pxl`/`.apxl` encoded by an earlier build. Those two encoded
+references are decoded and compared against the source pixels, which is the one
+check a round-trip cannot make: a round-trip only proves the encoder agrees with
+itself, while these prove today's decoder still reads what an older encoder
+wrote.
+
+Since decoders run on untrusted files, they are also soaked under sanitizers
+(this is what CI does, and how two memory-safety bugs were found):
+
+```sh
+cmake -B build-asan -DPXL_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-asan -j
+ASAN_OPTIONS=detect_leaks=1 ./build-asan/pxl_fuzz_decode 300000
+ASAN_OPTIONS=detect_leaks=1 ctest --test-dir build-asan --output-on-failure
+```
+
+By default it links the **system** libpng/zstd via pkg-config. To build against
+the bundled sources instead (used by CI for reproducible, version-pinned
+rebuilds):
+
+```sh
+cmake -B build -DPXL_VENDORED=ON
+cmake --build build -j
+```
+
+## CLI
+
+```sh
+pxltool c     in.png  out.pxl  [-l LEVEL] [-p]  # PNG -> PXL (-p = progressive)
+pxltool d     in.pxl  out.png              # PXL  -> PNG
+pxltool info  in.pxl                       # print header + stats
+pxltool ca    in.apng out.apxl [-l LEVEL]  # APNG -> APXL (animation)
+pxltool da    in.apxl out.apng             # APXL -> APNG
+pxltool ainfo in.apxl                      # print animation header + frame modes
+```
+
+`LEVEL` is the zstd compression level (default 1, matching Zpng).
+
+## Animation (`.apxl`)
+
+`.apxl` is the animated container: a canvas plus a sequence of frames. libpng
+does not decode APNG, so PXL parses the `acTL`/`fcTL`/`fdAT` chunks itself and
+composites each frame onto an RGBA canvas (honoring dispose/blend/offset). All
+full-canvas frames are then concatenated and compressed as **one** zstd stream
+with long-distance matching, so the compressor reuses the large redundancy
+between frames — this beats per-frame streams, temporal deltas, and per-frame
+filtering, all of which break cross-frame byte matches (measured, not assumed).
+
+Because animation depends on long-distance matching (enabled at level ≥ 10),
+`ca` defaults to level 12 rather than the still-image default of 1.
+
+Round-trips are pixel-exact: every displayed frame decodes bit-for-bit, and the
+regenerated APNG is accepted by third-party tools (verified with apngdis 2.9).
+On the sample elephant animation (34 frames), `.apxl` is ~57% of the source
+APNG at `-l 22`. The container is defined in [SPEC.md](SPEC.md) §10.
+
+## Progressive (top-to-bottom) decoding
+
+For web use, a `.pxl` can be painted while it downloads, the way a
+non-interlaced PNG is. This needs no format change: rows decode independently
+under the *delta* filter and depend only on the row above under *adaptive*, so
+both stream. Only *BCIF* breaks it, because the color-plane split means no row
+is complete until the last plane byte arrives.
+
+Encode with `PXL_ENCODE_PROGRESSIVE` (`pxltool c … -p`) to exclude BCIF, then
+push bytes into the streaming decoder in any chunk size:
+
+```c
+pxl_stream* s = pxl_stream_new(on_row, ctx);   /* on_row is called per row */
+while (recv(&chunk, &n))
+    if (pxl_stream_feed(s, chunk, n) < 0) { /* malformed */ }
+uint32_t rows_ready;
+const pxl_image* img = pxl_stream_image(s, &rows_ready);
+int complete = pxl_stream_finish(s);
+pxl_stream_free(s);
+```
+
+Rows become available a zstd block at a time (≤128 KiB of decompressed data), so
+on a 2732×1536 photo they track download progress almost linearly — ~5% of the
+bytes yields ~95 of 1536 rows. Any `.pxl` can be fed to the streaming decoder;
+BCIF files simply deliver all their rows at `pxl_stream_finish`.
+
+The tradeoff is size: on photographic content BCIF usually wins, so `-p` costs a
+few percent (measured ~8.8% on the sample wallpaper). On graphics and gradients,
+where adaptive already wins, `-p` costs nothing.
+
+Since `libpxlcore` is PNG-free (zstd only), this decoder is what a future WASM
+build will expose to the browser.
+
+## Library API
+
+```c
+#include <pxl.h>
+
+pxl_image  pxl_load_png(const char* path);
+pxl_buffer pxl_encode(const pxl_image* img, int zstd_level);
+pxl_buffer pxl_encode_ex(const pxl_image* img, int level, unsigned flags);
+pxl_image  pxl_decode(pxl_buffer file);
+int        pxl_save_png(const char* path, const pxl_image* img);
+void       pxl_free(pxl_buffer* buf);
+void       pxl_image_free(pxl_image* img);   /* frees pixels + metadata */
+
+/* streaming decode -- see "Progressive decoding" above */
+pxl_stream*      pxl_stream_new(pxl_row_cb cb, void* user);
+int              pxl_stream_feed(pxl_stream* s, const void* data, size_t len);
+const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready);
+int              pxl_stream_finish(pxl_stream* s);
+void             pxl_stream_free(pxl_stream* s);
+```
+
+Encoding is always lossless at every bit depth. 16-bit samples are kept in
+PNG-native big-endian order, so 16-bit PNGs round-trip bit-for-bit. Both color
+filters (delta, BCIF, adaptive) are tried at encode time and the smallest
+result is kept.
+
+## Automatic upstream tracking
+
+Three workflows keep the project honest without anyone watching upstream by hand.
+
+**Dependencies** — `rebuild.yml` runs daily, comparing the latest stable releases
+of [pnggroup/libpng](https://github.com/pnggroup/libpng) and
+[facebook/zstd](https://github.com/facebook/zstd) against the versions pinned in
+`VERSIONS.json`. When either is newer it vendors the new source, rebuilds, runs
+the tests, and commits the bump (`chore: bump libpng x / zstd y`) — or opens an
+issue if the build fails. A zstd upgrade changes the compressed bytes, which is
+why the committed reference files are verified by decoding rather than by
+comparing bytes.
+
+**FFmpeg** — `ffmpeg-patch-check.yml` runs weekly, and on any change under
+`ffmpeg/`. The registration patch edits ten files that upstream churns
+constantly, so it rots on its own: nothing here changes, yet one day it stops
+applying. The job clones FFmpeg master, applies the module, configures with
+`--enable-libpxl`, builds, and round-trips both a still image and the 20-frame
+APNG bit-exact through the resulting binary. On failure it opens one issue and
+comments on it thereafter, rather than filing a fresh one every week. The format
+itself is unaffected by a break here — nothing in the PXL build depends on
+`ffmpeg/`.
+
+**Our own code** — `ci.yml` covers every push: both dependency configurations,
+the install and an out-of-tree consumer linking `libpxlcore` with zstd alone, the
+pkg-config metadata, and the sanitized decoder soak.
+
+## FFmpeg module
+
+[`ffmpeg/`](ffmpeg/README.md) holds a module that teaches FFmpeg both containers:
+decoders and encoders for `.pxl` and `.apxl`, an `apxl` demuxer/muxer, and `.pxl`
+in the `image2` sequence handling. It is a wrapper around `libpxlcore` enabled
+with `--enable-libpxl`, because FFmpeg carries no zstd of its own — a native
+codec would mean vendoring a decompressor into libavcodec.
+
+```sh
+./ffmpeg/apply.sh /path/to/FFmpeg
+PKG_CONFIG_PATH=$PWD/_inst/lib/pkgconfig ./configure --enable-libpxl
+```
+
+Verified against FFmpeg 8.0.git: all eight pixel formats round-trip bit-exact,
+a 34-frame APNG survives `APNG → .apxl → APNG` with identical pixels and
+identical per-frame timing, and files written by FFmpeg are readable by
+`pxltool` (and vice versa).
+
+It lives here rather than in its own repository because it is not an
+independent project: every one of its four files is a thin translation layer
+over this library's ABI, and a format change would have to land in both places
+at once. Nothing in our build references `ffmpeg/` — no CMake target, no test —
+so it is a directory of patch material, not a dependency. If it ever gets
+accepted upstream, FFmpeg's tree becomes the home and this directory goes away.
+
+## Specification
+
+The byte format is defined formally in [SPEC.md](SPEC.md) — enough to write an
+independent encoder/decoder (e.g. an ffmpeg codec) without reading this source.
+
+## License
+
+PXL adds no terms of its own. It is distributed under the combination of the
+libpng license, the zstd BSD license, and the Zpng BSD-3 license (for the pixel
+filters). See [LICENSE](LICENSE).

@@ -1,0 +1,12 @@
+# Relocatable prefix -- see the note in libpxlcore.pc.in.
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libpxl
+Description: PNG XL (.pxl/.apxl) codec with PNG/APNG interop
+Version: @PROJECT_VERSION@
+Requires.private: libzstd libpng zlib
+Cflags: -I${includedir}
+Libs: -L${libdir} -lpxl

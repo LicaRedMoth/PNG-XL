@@ -1,0 +1,211 @@
+diff --git a/configure b/configure
+index 63164fa54a..2149198917 100755
+--- a/configure
++++ b/configure
+@@ -265,6 +265,7 @@ External library support:
+   --enable-libopus         enable Opus de/encoding via libopus [no]
+   --enable-libplacebo      enable libplacebo library [no]
+   --enable-libpulse        enable Pulseaudio input via libpulse [no]
++  --enable-libpxl          enable PNG XL de/encoding via libpxl [no]
+   --enable-libqrencode     enable QR encode generation via libqrencode [no]
+   --enable-libquirc        enable QR decoding via libquirc [no]
+   --enable-librabbitmq     enable RabbitMQ library [no]
+@@ -2082,6 +2083,7 @@ EXTERNAL_LIBRARY_LIST="
+     libopus
+     libplacebo
+     libpulse
++    libpxl
+     libqrencode
+     libquirc
+     librabbitmq
+@@ -3830,6 +3832,10 @@ libjxl_anim_encoder_deps="libjxl libjxl_threads"
+ libjxl_decoder_deps="libjxl libjxl_threads"
+ libjxl_encoder_deps="libjxl libjxl_threads"
+ libkvazaar_encoder_deps="libkvazaar"
++libpxl_decoder_deps="libpxl"
++libpxl_encoder_deps="libpxl"
++libpxl_anim_decoder_deps="libpxl"
++libpxl_anim_encoder_deps="libpxl"
+ liblc3_decoder_deps="liblc3"
+ liblc3_encoder_deps="liblc3"
+ liblc3_encoder_select="audio_frame_queue"
+@@ -7405,6 +7411,7 @@ enabled libopus           && {
+ }
+ enabled libplacebo        && require_pkg_config libplacebo "libplacebo >= 7.351.0" libplacebo/vulkan.h pl_vulkan_create
+ enabled libpulse          && require_pkg_config libpulse libpulse pulse/pulseaudio.h pa_context_new
++enabled libpxl            && require_pkg_config libpxl "libpxlcore >= 1.5.0" pxl.h pxl_version
+ enabled libqrencode       && require_pkg_config libqrencode libqrencode qrencode.h QRcode_encodeString
+ enabled libquirc          && require libquirc quirc.h quirc_decode -lquirc
+ enabled librabbitmq       && require_pkg_config librabbitmq "librabbitmq >= 0.7.1" amqp.h amqp_new_connection
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index 232fdd7339..a9ec278203 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -1196,6 +1196,10 @@ OBJS-$(CONFIG_LIBILBC_ENCODER)            += libilbc.o
+ OBJS-$(CONFIG_LIBJXL_DECODER)             += libjxldec.o libjxl.o
+ OBJS-$(CONFIG_LIBJXL_ENCODER)             += libjxlenc.o libjxl.o
+ OBJS-$(CONFIG_LIBKVAZAAR_ENCODER)         += libkvazaar.o
++OBJS-$(CONFIG_LIBPXL_DECODER)             += libpxldec.o
++OBJS-$(CONFIG_LIBPXL_ENCODER)             += libpxlenc.o
++OBJS-$(CONFIG_LIBPXL_ANIM_DECODER)        += libpxldec.o
++OBJS-$(CONFIG_LIBPXL_ANIM_ENCODER)        += libpxlenc.o
+ OBJS-$(CONFIG_LIBLC3_ENCODER)             += liblc3enc.o
+ OBJS-$(CONFIG_LIBLC3_DECODER)             += liblc3dec.o
+ OBJS-$(CONFIG_LIBMP3LAME_ENCODER)         += libmp3lame.o
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index e1668f1e80..c7e5e8bc03 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -799,6 +799,10 @@ extern const FFCodec ff_libopencore_amrwb_decoder;
+ extern const FFCodec ff_libopenjpeg_encoder;
+ extern const FFCodec ff_libopus_encoder;
+ extern const FFCodec ff_libopus_decoder;
++extern const FFCodec ff_libpxl_anim_decoder;
++extern const FFCodec ff_libpxl_anim_encoder;
++extern const FFCodec ff_libpxl_decoder;
++extern const FFCodec ff_libpxl_encoder;
+ extern const FFCodec ff_librav1e_encoder;
+ extern const FFCodec ff_librsvg_decoder;
+ extern const FFCodec ff_libshine_encoder;
+diff --git a/libavcodec/codec_desc.c b/libavcodec/codec_desc.c
+index 299a469ce4..9caf6d9b04 100644
+--- a/libavcodec/codec_desc.c
++++ b/libavcodec/codec_desc.c
+@@ -1992,6 +1992,22 @@ static const AVCodecDescriptor codec_descriptors[] = {
+         .props     = AV_CODEC_PROP_LOSSY | AV_CODEC_PROP_LOSSLESS,
+         .mime_types= MT("image/webp"),
+     },
++    {
++        .id        = AV_CODEC_ID_PXL,
++        .type      = AVMEDIA_TYPE_VIDEO,
++        .name      = "pxl",
++        .long_name = NULL_IF_CONFIG_SMALL("PXL (PNG XL) image"),
++        .props     = AV_CODEC_PROP_INTRA_ONLY | AV_CODEC_PROP_LOSSLESS,
++        .mime_types= MT("image/pxl"),
++    },
++    {
++        .id        = AV_CODEC_ID_PXL_ANIM,
++        .type      = AVMEDIA_TYPE_VIDEO,
++        .name      = "pxl_anim",
++        .long_name = NULL_IF_CONFIG_SMALL("PXL (PNG XL) animated"),
++        .props     = AV_CODEC_PROP_LOSSLESS,
++        .mime_types= MT("image/apxl"),
++    },
+ 
+     /* various PCM "codecs" */
+     {
+diff --git a/libavcodec/codec_id.h b/libavcodec/codec_id.h
+index ff2c21526c..1ef7f09137 100644
+--- a/libavcodec/codec_id.h
++++ b/libavcodec/codec_id.h
+@@ -324,6 +324,8 @@ enum AVCodecID {
+     AV_CODEC_ID_PRORES_RAW,
+     AV_CODEC_ID_JPEGXS,
+     AV_CODEC_ID_WEBP_ANIM,
++    AV_CODEC_ID_PXL,
++    AV_CODEC_ID_PXL_ANIM,
+ 
+     /* various PCM "codecs" */
+     AV_CODEC_ID_FIRST_AUDIO = 0x10000,     ///< A dummy id pointing at the start of audio codecs
+diff --git a/libavformat/Makefile b/libavformat/Makefile
+index 2f85e8a2ad..675e6188c2 100644
+--- a/libavformat/Makefile
++++ b/libavformat/Makefile
+@@ -126,6 +126,8 @@ OBJS-$(CONFIG_APM_DEMUXER)               += apm.o
+ OBJS-$(CONFIG_APM_MUXER)                 += apm.o rawenc.o
+ OBJS-$(CONFIG_APNG_DEMUXER)              += apngdec.o
+ OBJS-$(CONFIG_APNG_MUXER)                += apngenc.o
++OBJS-$(CONFIG_APXL_DEMUXER)              += apxldec.o
++OBJS-$(CONFIG_APXL_MUXER)                += apxlenc.o
+ OBJS-$(CONFIG_APTX_DEMUXER)              += aptxdec.o
+ OBJS-$(CONFIG_APTX_MUXER)                += rawenc.o
+ OBJS-$(CONFIG_APTX_HD_DEMUXER)           += aptxdec.o
+diff --git a/libavformat/allformats.c b/libavformat/allformats.c
+index e121c7441c..3820ba67f5 100644
+--- a/libavformat/allformats.c
++++ b/libavformat/allformats.c
+@@ -68,6 +68,8 @@ extern const FFInputFormat  ff_apm_demuxer;
+ extern const FFOutputFormat ff_apm_muxer;
+ extern const FFInputFormat  ff_apng_demuxer;
+ extern const FFOutputFormat ff_apng_muxer;
++extern const FFInputFormat  ff_apxl_demuxer;
++extern const FFOutputFormat ff_apxl_muxer;
+ extern const FFInputFormat  ff_aptx_demuxer;
+ extern const FFOutputFormat ff_aptx_muxer;
+ extern const FFInputFormat  ff_aptx_hd_demuxer;
+@@ -567,6 +569,7 @@ extern const FFInputFormat  ff_image_pictor_pipe_demuxer;
+ extern const FFInputFormat  ff_image_png_pipe_demuxer;
+ extern const FFInputFormat  ff_image_ppm_pipe_demuxer;
+ extern const FFInputFormat  ff_image_psd_pipe_demuxer;
++extern const FFInputFormat  ff_image_pxl_pipe_demuxer;
+ extern const FFInputFormat  ff_image_qdraw_pipe_demuxer;
+ extern const FFInputFormat  ff_image_qoi_pipe_demuxer;
+ extern const FFInputFormat  ff_image_sgi_pipe_demuxer;
+diff --git a/libavformat/img2.c b/libavformat/img2.c
+index 2c69a932da..5d4410ddf3 100644
+--- a/libavformat/img2.c
++++ b/libavformat/img2.c
+@@ -94,6 +94,7 @@
+     TAG(JPEGXL,          jxl      ) \
+     TAG(JPEGXS,          jxs      ) \
+     TAG(QOI,             qoi      ) \
++    TAG(PXL,             pxl      ) \
+     TAG(RADIANCE_HDR,    hdr      ) \
+     TAG(WBMP,            wbmp     ) \
+     TAG(NONE,                     )
+diff --git a/libavformat/img2dec.c b/libavformat/img2dec.c
+index d5718eff41..9172631c4a 100644
+--- a/libavformat/img2dec.c
++++ b/libavformat/img2dec.c
+@@ -1159,6 +1159,30 @@ static int qoi_probe(const AVProbeData *p)
+     return AVPROBE_SCORE_MAX - 1;
+ }
+ 
++/* .pxl still image: 24-byte header, "PXL1" magic, then one zstd frame.
++   Animated .apxl uses the "APXL" magic and its own demuxer. */
++static int pxl_probe(const AVProbeData *p)
++{
++    if (p->buf_size < 24)
++        return 0;
++
++    if (memcmp(p->buf, "PXL1", 4))
++        return 0;
++
++    if (p->buf[4] != 1)                     /* version */
++        return 0;
++    if (p->buf[5] < 1 || p->buf[5] > 4)     /* channels */
++        return 0;
++    if (p->buf[6] != 1 && p->buf[6] != 2)   /* bytes per channel */
++        return 0;
++    if (p->buf[7] > 2)                      /* color filter */
++        return 0;
++    if (!AV_RL32(p->buf + 8) || !AV_RL32(p->buf + 12))   /* dimensions */
++        return 0;
++
++    return AVPROBE_SCORE_MAX;
++}
++
+ static int gem_probe(const AVProbeData *p)
+ {
+     const uint8_t *b = p->buf;
+@@ -1239,6 +1263,7 @@ IMAGEAUTO_DEMUXER(pictor,    PICTOR)
+ IMAGEAUTO_DEMUXER(png,       PNG)
+ IMAGEAUTO_DEMUXER(ppm,       PPM)
+ IMAGEAUTO_DEMUXER(psd,       PSD)
++IMAGEAUTO_DEMUXER(pxl,       PXL)
+ IMAGEAUTO_DEMUXER(qdraw,     QDRAW)
+ IMAGEAUTO_DEMUXER(qoi,       QOI)
+ IMAGEAUTO_DEMUXER(sgi,       SGI)
+diff --git a/libavformat/img2enc.c b/libavformat/img2enc.c
+index 1296da8ec7..38507f81c5 100644
+--- a/libavformat/img2enc.c
++++ b/libavformat/img2enc.c
+@@ -395,7 +395,7 @@ const FFOutputFormat ff_image2_muxer = {
+     .p.long_name    = NULL_IF_CONFIG_SMALL("image2 sequence"),
+     .p.extensions   = "bmp,dpx,exr,jls,jpeg,jpg,jxs,jxl,ljpg,pam,pbm,pcx,pfm,pgm,pgmyuv,phm,"
+                       "png,ppm,sgi,tga,tif,tiff,jp2,j2c,j2k,xwd,sun,ras,rs,im1,im8,"
+-                      "im24,sunras,vbn,xbm,xface,pix,y,avif,qoi,hdr,wbmp",
++                      "im24,sunras,vbn,xbm,xface,pix,y,avif,qoi,hdr,wbmp,pxl",
+     .priv_data_size = sizeof(VideoMuxData),
+     .p.video_codec  = AV_CODEC_ID_MJPEG,
+     .write_header   = write_header,

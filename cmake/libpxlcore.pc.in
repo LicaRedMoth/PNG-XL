@@ -1,0 +1,14 @@
+# Relocatable: pcfiledir is <prefix>/lib/pkgconfig, so the prefix is two levels
+# up. This stays correct when `cmake --install --prefix` overrides the configure
+# time prefix, which is how consumers (and our CI) install into a staging dir.
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libpxlcore
+Description: PNG XL (.pxl/.apxl) codec core -- raw pixels <-> container bytes, PNG-free
+Version: @PROJECT_VERSION@
+Requires.private: libzstd
+Cflags: -I${includedir}
+Libs: -L${libdir} -lpxlcore
