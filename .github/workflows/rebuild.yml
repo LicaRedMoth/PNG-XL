@@ -34,14 +34,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Latest non-prerelease tag, stripped of a leading "v" / "zstd-" / "libpng-".
+          # zstd publishes GitHub Releases, so take the latest non-prerelease.
           latest_release() {
             local repo="$1"
             gh api "repos/$repo/releases" --jq \
               '[.[] | select(.prerelease==false and .draft==false)][0].tag_name'
           }
 
-          png_tag="$(latest_release pnggroup/libpng || true)"
+          # libpng publishes none at all -- the releases endpoint returns an
+          # empty list -- so its stable versions have to come from tags. The tag
+          # namespace holds more than releases: prereleases (v1.7.0beta89, which
+          # sorts above v1.6.58), the historical libpng-1.6.31-signed set, and
+          # unrelated projects (pngzop-1.0.2). Anchoring on exactly vX.Y.Z admits
+          # only stable releases and rejects all three. Sorted by version, not by
+          # tag order, since tag order is not guaranteed. Without this the libpng
+          # half of this job silently resolved to an empty string and never fired.
+          latest_stable_tag() {
+            local repo="$1"
+            gh api --paginate "repos/$repo/tags?per_page=100" --jq '.[].name' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -1
+          }
+
+          png_tag="$(latest_stable_tag pnggroup/libpng || true)"
           zstd_tag="$(latest_release facebook/zstd || true)"
 
           # Normalize to bare versions, e.g. v1.6.60 -> 1.6.60, zstd-1.5.8 -> 1.5.8.
