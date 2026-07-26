@@ -1,6 +1,7 @@
 /build/
 /build-vendored/
 /build-asan/
+/kde/build/
 # Staging prefixes used to point FFmpeg's pkg-config at a local libpxl build
 /_inst/
 /_inst_asan/

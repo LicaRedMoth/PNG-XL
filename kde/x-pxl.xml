@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="image/x-pxl">
+    <comment>PNG XL image</comment>
+    <glob pattern="*.pxl"/>
+    <magic priority="60">
+      <match type="string" value="PXL1" offset="0"/>
+    </magic>
+  </mime-type>
+  <mime-type type="image/x-apxl">
+    <comment>Animated PNG XL</comment>
+    <glob pattern="*.apxl"/>
+    <magic priority="60">
+      <match type="string" value="APXL" offset="0"/>
+    </magic>
+  </mime-type>
+</mime-info>
