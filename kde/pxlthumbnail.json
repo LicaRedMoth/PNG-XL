@@ -1,0 +1,6 @@
+{
+    "KPlugin": {
+        "MimeTypes": ["image/x-pxl", "image/x-apxl"],
+        "Name": "PXL Images"
+    }
+}

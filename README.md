@@ -308,6 +308,25 @@ at once. Nothing in our build references `ffmpeg/` — no CMake target, no test 
 so it is a directory of patch material, not a dependency. If it ever gets
 accepted upstream, FFmpeg's tree becomes the home and this directory goes away.
 
+## KDE / Qt plugins
+
+[`kde/`](kde/README.md) holds two read-only plugins for a KDE desktop:
+`kimg_pxl`, a `QImageIOPlugin` that lets Gwenview and any other Qt application
+open `.pxl`/`.apxl` (with animation playback), and `pxlthumbnail`, a standalone
+`KIO::ThumbnailCreator` for Dolphin previews. The second is not redundant:
+`kio-extras`' image thumbnailer never asks `QImageReader` what it can decode at
+runtime, so it ignores newly installed image plugins.
+
+```sh
+PKG_CONFIG_PATH="$PWD/build" cmake -B kde/build -S kde && cmake --build kde/build -j
+sudo cmake --install kde/build && sudo update-mime-database /usr/share/mime
+```
+
+They decode only — encoding stays `pxltool`'s job — and depend on `libpxlcore`
+alone, not on libpng. Like `ffmpeg/`, this directory is thin ABI glue that has
+to track the format, so it lives here but is wired into neither the root
+`CMakeLists.txt` nor CI.
+
 ## Specification
 
 The byte format is defined formally in [SPEC.md](SPEC.md) — enough to write an

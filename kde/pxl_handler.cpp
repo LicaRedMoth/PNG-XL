@@ -1,6 +1,7 @@
 #include "pxl_handler.h"
 
 #include <QIODevice>
+#include <QSize>
 #include <QtEndian>
 
 extern "C" {
@@ -121,7 +122,7 @@ static QImage imageFromPxl(const pxl_image& img)
     case 3: {
         QImage out(w, h, QImage::Format_RGBA64);
         for (uint32_t y = 0; y < h; ++y) {
-            const auto* row = reinterpret_cast<const quint16*>(src + static_cast<size_t>(y) * w * 3);
+            const auto* row = reinterpret_cast<const quint16*>(src + static_cast<size_t>(y) * w * 3 * 2);
             auto* dst = reinterpret_cast<quint16*>(out.scanLine(y));
             for (uint32_t x = 0; x < w; ++x) {
                 dst[x * 4 + 0] = qFromBigEndian(row[x * 3 + 0]);
@@ -135,9 +136,9 @@ static QImage imageFromPxl(const pxl_image& img)
     case 4: {
         QImage out(w, h, QImage::Format_RGBA64);
         for (uint32_t y = 0; y < h; ++y) {
-            const auto* row = reinterpret_cast<const quint16*>(src + static_cast<size_t>(y) * w * 4);
+            const auto* row = reinterpret_cast<const quint16*>(src + static_cast<size_t>(y) * w * 4 * 2);
             auto* dst = reinterpret_cast<quint16*>(out.scanLine(y));
-            for (uint32_t x = 0; x < w; ++x)
+            for (uint32_t x = 0; x < w * 4; ++x)
                 dst[x] = qFromBigEndian(row[x]);
         }
         return out;
@@ -147,7 +148,7 @@ static QImage imageFromPxl(const pxl_image& img)
     }
 }
 
-bool PxlHandler::ensureDecoded()
+bool PxlHandler::ensureDecoded() const
 {
     if (m_decodeAttempted)
         return m_decodeOk;
@@ -199,6 +200,10 @@ bool PxlHandler::read(QImage* image)
 
 int PxlHandler::imageCount() const
 {
+    /* QImageReader/QMovie call this before the first read() to decide
+       whether the file is animated at all -- decode eagerly rather than
+       reporting 1 just because nothing has read a frame yet. */
+    ensureDecoded();
     if (m_kind != Kind::Animated)
         return 1;
     return static_cast<int>(m_anim.frame_count);
@@ -259,7 +264,22 @@ bool PxlHandler::supportsOption(ImageOption option) const
 
 QVariant PxlHandler::option(ImageOption option) const
 {
-    if (option == QImageIOHandler::Animation)
+    if (option == QImageIOHandler::Animation) {
+        ensureDecoded();
         return m_kind == Kind::Animated;
+    }
+    if (option == QImageIOHandler::Size) {
+        /* QMovie sizes its internal frame buffer off this option before the
+           first read() -- without it, it composites into a 0x0 image even
+           though read() itself decodes fine. */
+        if (!ensureDecoded())
+            return QVariant();
+        if (m_kind == Kind::Still)
+            return QSize(static_cast<int>(m_still.width), static_cast<int>(m_still.height));
+        if (m_kind == Kind::Animated && m_anim.frame_count > 0)
+            return QSize(static_cast<int>(m_anim.frames[0].image.width),
+                         static_cast<int>(m_anim.frames[0].image.height));
+        return QVariant();
+    }
     return QVariant();
 }

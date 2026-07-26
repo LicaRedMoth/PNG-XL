@@ -37,15 +37,18 @@ public:
 private:
     enum class Kind { Unknown, Still, Animated };
 
-    bool ensureDecoded();
+    /* const so imageCount()/supportsOption() can trigger the decode too --
+       QImageReader/QMovie query those before the first read() to learn
+       whether the file is animated at all. */
+    bool ensureDecoded() const;
 
-    Kind m_kind = Kind::Unknown;
-    bool m_decodeAttempted = false;
-    bool m_decodeOk = false;
+    mutable Kind m_kind = Kind::Unknown;
+    mutable bool m_decodeAttempted = false;
+    mutable bool m_decodeOk = false;
     int m_currentImage = 0;
 
-    pxl_image m_still{};
-    apxl_anim m_anim{};
+    mutable pxl_image m_still{};
+    mutable apxl_anim m_anim{};
 };
 
 #endif /* PXL_HANDLER_H */

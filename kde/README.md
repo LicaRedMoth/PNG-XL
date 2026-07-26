@@ -1,15 +1,22 @@
-# PXL Qt image plugin
+# PXL plugins for KDE / Qt
 
-A `QImageIOPlugin` that teaches Qt to open `.pxl` (still) and `.apxl`
-(animated) files. Once Qt can decode them, two things happen for free:
+Two read-only plugins that make `.pxl` (still) and `.apxl` (animated) files
+behave like any other image format on a KDE desktop:
 
-- **Gwenview** displays and browses `.pxl`/`.apxl` like any other image
-  format, including frame-by-frame animation playback for `.apxl`.
-- **Dolphin** shows thumbnails, since `kio-extras`' `imagethumbnail` plugin
-  just asks `QImageReader` what it can decode -- it needs no PXL-specific
-  code of its own.
+- **`kimg_pxl`** -- a `QImageIOPlugin` teaching Qt to decode both containers.
+  With it **Gwenview** displays and browses `.pxl`/`.apxl` like any other
+  format, including frame-by-frame animation playback for `.apxl`, and so does
+  any other Qt application.
+- **`pxlthumbnail`** -- a standalone `KIO::ThumbnailCreator` for **Dolphin**
+  previews. This is *not*
+  redundant with `kimg_pxl`. `kio-extras`' `imagethumbnail.so` does not ask
+  `QImageReader` what it can decode at runtime; its `MimeTypes` list is static
+  metadata baked in when `kio-extras` itself was built, so it never routes
+  `.pxl`/`.apxl` to Qt no matter which image plugins are installed. The
+  thumbnailer declares `image/x-pxl` and `image/x-apxl` itself and decodes
+  through the same `PxlHandler`, reading just the first frame for `.apxl`.
 
-Read-only: this plugin only decodes for display. Encoding is `pxltool`'s job.
+Read-only: these plugins only decode for display. Encoding is `pxltool`'s job.
 
 It lives here rather than in its own repository for the same reason as
 [`../ffmpeg/`](../ffmpeg/README.md): it is a thin wrapper over `libpxlcore`'s
@@ -40,6 +47,14 @@ Point Qt at the freshly built plugin directly:
 QT_PLUGIN_PATH="$PWD/kde/build" gwenview tests/data/Animated_PNG_example_bouncing_beach_ball.apxl
 ```
 
+Qt scans `<QT_PLUGIN_PATH>/imageformats/`, not the path root, which is why the
+build puts `kimg_pxl.so` in `kde/build/imageformats/`. Worth knowing because
+the failure mode is quiet: if the plugin sits at the build root, Qt finds
+nothing there and a previously installed copy under `/usr` answers instead, so
+a test can pass while exercising a stale plugin. To be sure you are testing the
+local build, temporarily move any installed copy aside, or check that
+`QT_DEBUG_PLUGINS=1` names a path inside your build directory.
+
 For Dolphin thumbnails to pick it up, the mime types need to be registered
 too, but only in your user's mime database, not the system one:
 
@@ -48,8 +63,9 @@ mkdir -p ~/.local/share/mime/packages
 cp kde/x-pxl.xml ~/.local/share/mime/packages/
 update-mime-database ~/.local/share/mime
 
-mkdir -p ~/.local/lib/qt6/plugins/imageformats
-cp kde/build/kimg_pxl.so ~/.local/lib/qt6/plugins/imageformats/
+mkdir -p ~/.local/lib/qt6/plugins/imageformats ~/.local/lib/qt6/plugins/kf6/thumbcreator
+cp kde/build/imageformats/kimg_pxl.so ~/.local/lib/qt6/plugins/imageformats/
+cp kde/build/kf6/thumbcreator/pxlthumbnail.so ~/.local/lib/qt6/plugins/kf6/thumbcreator/
 QT_PLUGIN_PATH="$HOME/.local/lib/qt6/plugins:$QT_PLUGIN_PATH" dolphin
 ```
 
