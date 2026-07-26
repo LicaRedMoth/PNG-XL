@@ -12,8 +12,35 @@
 
 #include <zstd.h>
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Decode-side resource limits. A 24-byte header can claim any geometry, and
+   the filtered stream that backs it compresses to almost nothing (a run of
+   zeros), so without a cap a few-hundred-byte file forces multi-gigabyte
+   allocations in pxl_decode/stream_begin. Mirrors APNG_MAX_DIM/
+   APNG_MAX_PIXELS in apng.c. */
+#define PXL_MAX_DIM     1000000u
+#define PXL_MAX_PIXELS  ((uint64_t)1 << 28)
+
+/* Returns 1 if the header geometry is within the decode limits. */
+static int geometry_ok(uint32_t width, uint32_t height, unsigned pixel_bytes)
+{
+    if (width == 0 || height == 0) {
+        return 0;
+    }
+    if (width > PXL_MAX_DIM || height > PXL_MAX_DIM) {
+        return 0;
+    }
+    if ((uint64_t)width * height > PXL_MAX_PIXELS) {
+        return 0;
+    }
+    /* With pixels capped at 2^28 and pixel_bytes at 8, width*height*pixel_bytes
+       tops out at 2^31 and cannot overflow size_t on any supported target. */
+    (void)pixel_bytes;
+    return 1;
+}
 
 /*----------------------------------------------------------------------------
   Generic filter: per-channel left delta, for any bytes-per-pixel 1..8.
@@ -613,17 +640,18 @@ pxl_image pxl_decode(pxl_buffer file)
     }
 
     pixel_bytes = (unsigned)h.channels * h.bytes_per_channel;
-    pixel_bytes_total = (size_t)h.width * h.height * pixel_bytes;
 
     /* raw_byte_count is the size of the (decompressed) filtered stream, which
        depends on the filter. Validate it against the expected size for this
-       filter/geometry so we never trust the header blindly for allocation. */
+       filter/geometry so we never trust the header blindly for allocation.
+       geometry_ok() must run before any width*height arithmetic. */
     if (h.color_filter > PXL_FILTER_ADAPTIVE ||
-        pixel_bytes_total == 0 ||
+        !geometry_ok(h.width, h.height, pixel_bytes) ||
         (size_t)h.raw_byte_count !=
             filtered_size(h.color_filter, h.width, h.height, pixel_bytes)) {
         return img;
     }
+    pixel_bytes_total = (size_t)h.width * h.height * pixel_bytes;
     /* BCIF is defined only for 8-bit RGB/RGBA; any other geometry with that
        filter byte is a malformed (or crafted) file. */
     if (h.color_filter == PXL_FILTER_BCIF &&
@@ -775,8 +803,9 @@ static int stream_begin(pxl_stream* s)
         return 0;
     }
     s->pixel_bytes = (unsigned)s->h.channels * s->h.bytes_per_channel;
-    pixels_total = (size_t)s->h.width * s->h.height * s->pixel_bytes;
-    if (s->h.color_filter > PXL_FILTER_ADAPTIVE || pixels_total == 0 ||
+    /* geometry_ok() must run before any width*height arithmetic. */
+    if (s->h.color_filter > PXL_FILTER_ADAPTIVE ||
+        !geometry_ok(s->h.width, s->h.height, s->pixel_bytes) ||
         (size_t)s->h.raw_byte_count !=
             filtered_size(s->h.color_filter, s->h.width, s->h.height, s->pixel_bytes)) {
         return 0;
@@ -787,6 +816,7 @@ static int stream_begin(pxl_stream* s)
         return 0;
     }
 
+    pixels_total = (size_t)s->h.width * s->h.height * s->pixel_bytes;
     s->row_stride = (size_t)s->h.width * s->pixel_bytes;
     s->frow_stride = (s->h.color_filter == PXL_FILTER_ADAPTIVE)
                          ? s->row_stride + 1 : s->row_stride;

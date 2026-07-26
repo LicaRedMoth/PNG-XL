@@ -21,6 +21,25 @@
 #define APXL_LDM_MIN_LEVEL 10
 #define APXL_WINDOW_LOG     27  /* 128 MiB match window */
 
+/* Sanity limits on canvas geometry and frame count, so a crafted header cannot
+   wrap the size_t arithmetic behind the frame allocations. Mirrors
+   PXL_MAX_DIM/PXL_MAX_PIXELS in pxl_codec.c. */
+#define APXL_MAX_DIM      1000000u
+#define APXL_MAX_PIXELS   ((uint64_t)1 << 28)
+#define APXL_MAX_FRAMES   1000000u
+
+/* Returns 1 if the canvas geometry and frame count are within decode limits.
+   pb is 1..8, so pixels <= 2^28 keeps canvas_bytes <= 2^31, and frames <= 2^20
+   keeps canvas_bytes*frame_count <= 2^51: both clear of size_t overflow. */
+static int apxl_geometry_ok(uint32_t w, uint32_t h, uint32_t frames)
+{
+    if (w == 0 || h == 0 || frames == 0) { return 0; }
+    if (w > APXL_MAX_DIM || h > APXL_MAX_DIM) { return 0; }
+    if ((uint64_t)w * h > APXL_MAX_PIXELS) { return 0; }
+    if (frames > APXL_MAX_FRAMES) { return 0; }
+    return 1;
+}
+
 void apxl_header_write(unsigned char* out, const apxl_file_header* h)
 {
     out[0] = APXL_MAGIC0; out[1] = APXL_MAGIC1;
@@ -55,7 +74,7 @@ int apxl_header_read(const unsigned char* in, size_t in_size, apxl_file_header* 
     if (h->version != APXL_VERSION) { return 0; }
     if (h->channels < 1 || h->channels > 4) { return 0; }
     if (h->bytes_per_channel != 1 && h->bytes_per_channel != 2) { return 0; }
-    if (h->canvas_w == 0 || h->canvas_h == 0 || h->frame_count == 0) { return 0; }
+    if (!apxl_geometry_ok(h->canvas_w, h->canvas_h, h->frame_count)) { return 0; }
     return 1;
 }
 
@@ -79,7 +98,7 @@ pxl_buffer apxl_encode(const apxl_anim* anim, int zstd_level)
     if (!anim || !anim->frames || anim->frame_count == 0) { return out; }
     if (anim->channels < 1 || anim->channels > 4) { return out; }
     if (anim->bytes_per_channel != 1 && anim->bytes_per_channel != 2) { return out; }
-    if (anim->canvas_w == 0 || anim->canvas_h == 0) { return out; }
+    if (!apxl_geometry_ok(anim->canvas_w, anim->canvas_h, anim->frame_count)) { return out; }
 
     if (zstd_level <= 0) { zstd_level = PXL_LEVEL_DEFAULT; }
     else if (zstd_level > PXL_LEVEL_MAX) { zstd_level = PXL_LEVEL_MAX; }
@@ -177,8 +196,10 @@ apxl_anim apxl_decode(pxl_buffer file)
 
     meta_size = fh.meta_byte_count;
     timing_bytes = (size_t)fh.frame_count * APXL_TIMING_BYTES;
+    /* Compute in 64-bit first: meta_byte_count is attacker-controlled up to
+       UINT32_MAX, which can wrap header_region where size_t is 32-bit. */
+    if ((uint64_t)APXL_HEADER_BYTES + meta_size + timing_bytes > file.size) { return anim; }
     header_region = APXL_HEADER_BYTES + meta_size + timing_bytes;
-    if (header_region > file.size) { return anim; }
     frame_off = header_region;
     timing = file.data + APXL_HEADER_BYTES + meta_size;
 
