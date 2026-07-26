@@ -76,6 +76,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+Building against the bundled sources (`-DPXL_VENDORED=ON`, below) requires the
+git submodules under `vendor/`: clone with `git clone --recurse-submodules`,
+or run `git submodule update --init --recursive` in an existing checkout. The
+default build above (system libpng/zstd) needs neither.
+
 The suite covers lossless round-trips at every bit depth, PNG and APNG interop,
 progressive streaming, and a malformed-input fuzz pass over the decoders. It also
 runs on real files from [`tests/data/`](tests/data/README.md) — a public-domain
@@ -201,11 +206,11 @@ Three workflows keep the project honest without anyone watching upstream by hand
 **Dependencies** — `rebuild.yml` runs daily, comparing the latest stable releases
 of [pnggroup/libpng](https://github.com/pnggroup/libpng) and
 [facebook/zstd](https://github.com/facebook/zstd) against the versions pinned in
-`VERSIONS.json`. When either is newer it vendors the new source, rebuilds, runs
-the tests, and commits the bump (`chore: bump libpng x / zstd y`) — or opens an
-issue if the build fails. A zstd upgrade changes the compressed bytes, which is
-why the committed reference files are verified by decoding rather than by
-comparing bytes.
+`VERSIONS.json`. When either is newer it advances the `vendor/libpng`/`vendor/zstd`
+git submodules to the new tag, rebuilds, runs the tests, and commits the bump
+(`chore: bump libpng x / zstd y`) — or opens an issue if the build fails. A zstd
+upgrade changes the compressed bytes, which is why the committed reference
+files are verified by decoding rather than by comparing bytes.
 
 **FFmpeg** — `ffmpeg-patch-check.yml` runs weekly, and on any change under
 `ffmpeg/`. The registration patch edits ten files that upstream churns

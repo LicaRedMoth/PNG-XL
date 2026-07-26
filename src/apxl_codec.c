@@ -1,5 +1,5 @@
 /** \file apxl_codec.c
-    \brief Animated PNG XL codec (v2): all full-canvas frames concatenated into
+    \brief Animated PNG XL codec (v1): all full-canvas frames concatenated into
            one zstd stream with long-distance matching.
 
     Rationale (measured on real animations): compressing every frame together in

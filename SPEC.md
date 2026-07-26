@@ -298,7 +298,7 @@ the layout without a new magic; until then decoders MUST reject other values.
 
 ---
 
-## 10. Animated PXL (`.apxl`), version 2
+## 10. Animated PXL (`.apxl`), version 1
 
 `.apxl` stores a lossless animation as a canvas plus N full-canvas frames. All
 frames' pixels are concatenated in order and compressed as **one** zstd frame
@@ -310,16 +310,15 @@ per-frame streams, temporal deltas, and per-frame spatial filtering all
 compress *worse* than a single cross-frame stream, because they destroy the
 byte-level matches between successive frames.
 
-`Version` is `2` because an earlier layout occupied the value `1` during
-development. That layout was never released and no such file exists, so `1` is
-simply retired: a decoder MUST reject it rather than implement it.
+Only `Version == 1` is defined for `.apxl`; decoders MUST reject any other
+value.
 
 ### 10.1 File header (32 bytes, little-endian)
 
 | Offset | Size | Field | Notes |
 |-------:|-----:|-------|-------|
 | 0  | 4 | `Magic` | ASCII `"APXL"` = `0x41 0x50 0x58 0x4C` |
-| 4  | 1 | `Version` | `2` |
+| 4  | 1 | `Version` | `1` |
 | 5  | 1 | `Channels` | 1..4 (canonically 4 = RGBA) |
 | 6  | 1 | `BytesPerChannel` | 1 or 2 |
 | 7  | 1 | `Flags` | reserved, 0 |

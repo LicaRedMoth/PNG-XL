@@ -1,5 +1,5 @@
 /** \file apxl_format.h
-    \brief On-disk layout of the .apxl (Animated PNG XL) container, version 2.
+    \brief On-disk layout of the .apxl (Animated PNG XL) container, version 1.
 
     An .apxl file stores all animation frames as full canvases concatenated
     into a single zstd frame (with long-distance matching), which lets zstd
@@ -11,7 +11,7 @@
     Header (32 bytes, little-endian, written byte-by-byte):
       offset size  field
       0      4     Magic = "APXL"
-      4      1     Version (=2)
+      4      1     Version (=1)
       5      1     Channels          (1..4)
       6      1     BytesPerChannel   (1 or 2)
       7      1     Flags             (reserved, 0)
@@ -40,7 +40,7 @@
 #define APXL_MAGIC2 0x58 /* 'X' */
 #define APXL_MAGIC3 0x4C /* 'L' */
 
-#define APXL_VERSION      2
+#define APXL_VERSION      1
 #define APXL_HEADER_BYTES 32
 #define APXL_TIMING_BYTES 4  /* per frame: delay_num(2) + delay_den(2) */
 

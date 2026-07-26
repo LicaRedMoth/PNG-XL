@@ -2,9 +2,9 @@ name: rebuild-on-upstream
 
 # Watches upstream libpng (pnggroup/libpng) and zstd (facebook/zstd) releases.
 # When either has a newer stable release than the version pinned in
-# VERSIONS.json, it vendors the new source, rebuilds pxltool, runs the
-# round-trip test, and (on success) commits the bump. On test failure it opens
-# an issue instead of committing.
+# VERSIONS.json, it advances the vendor/libpng and vendor/zstd git submodules
+# to the new tag, rebuilds pxltool, runs the round-trip test, and (on success)
+# commits the bump. On test failure it opens an issue instead of committing.
 
 on:
   schedule:
@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: Install build dependencies
         run: |
@@ -81,26 +83,21 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "libpng: $cur_png -> $png_ver   zstd: $cur_zstd -> $zstd_ver   changed=$changed"
 
-      - name: Fetch new sources
+      - name: Advance vendored submodules
         if: steps.latest.outputs.changed == 'true'
         run: |
           set -euo pipefail
           png_ver="${{ steps.latest.outputs.png_ver }}"
           zstd_ver="${{ steps.latest.outputs.zstd_ver }}"
 
-          if [ "$png_ver" != "${{ steps.latest.outputs.cur_png }}" ] && [ -n "$png_ver" ]; then
-            rm -rf libpng-*/
-            curl -fsSL "https://github.com/pnggroup/libpng/archive/refs/tags/${{ steps.latest.outputs.png_tag }}.tar.gz" -o png.tgz
-            tar xzf png.tgz && rm png.tgz
-            # Ensure the dir is named libpng-<ver> as the build expects.
-            mv libpng-* "libpng-$png_ver" 2>/dev/null || true
+          if [ -n "$png_ver" ] && [ "$png_ver" != "${{ steps.latest.outputs.cur_png }}" ]; then
+            git -C vendor/libpng fetch --tags origin
+            git -C vendor/libpng checkout "${{ steps.latest.outputs.png_tag }}"
           fi
 
-          if [ "$zstd_ver" != "${{ steps.latest.outputs.cur_zstd }}" ] && [ -n "$zstd_ver" ]; then
-            rm -rf zstd-*/
-            curl -fsSL "https://github.com/facebook/zstd/archive/refs/tags/${{ steps.latest.outputs.zstd_tag }}.tar.gz" -o zstd.tgz
-            tar xzf zstd.tgz && rm zstd.tgz
-            mv zstd-* "zstd-$zstd_ver" 2>/dev/null || true
+          if [ -n "$zstd_ver" ] && [ "$zstd_ver" != "${{ steps.latest.outputs.cur_zstd }}" ]; then
+            git -C vendor/zstd fetch --tags origin
+            git -C vendor/zstd checkout "${{ steps.latest.outputs.zstd_tag }}"
           fi
 
       - name: Build (vendored) and test
@@ -108,11 +105,7 @@ jobs:
         id: build
         run: |
           set -euo pipefail
-          png_ver="${{ steps.latest.outputs.png_ver }}"
-          zstd_ver="${{ steps.latest.outputs.zstd_ver }}"
-          cmake -B build -DPXL_VENDORED=ON \
-            -DPXL_PNG_DIR="$PWD/libpng-$png_ver" \
-            -DPXL_ZSTD_DIR="$PWD/zstd-$zstd_ver"
+          cmake -B build -DPXL_VENDORED=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
 
@@ -127,14 +120,11 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Name what is committed rather than `git add -A`. The vendored trees
-          # and VERSIONS.json are the whole change; a blanket add would sweep up
-          # anything else the build happened to leave behind, which is how build
-          # artifacts got committed here once before.
-          git add VERSIONS.json
-          git add -- "libpng-${{ steps.latest.outputs.png_ver }}" \
-                     "zstd-${{ steps.latest.outputs.zstd_ver }}" 2>/dev/null || true
-          git add -u   # stage deletions of the superseded vendored directories
+          # Name what is committed rather than `git add -A`. VERSIONS.json and
+          # the two submodule gitlinks are the whole change; a blanket add
+          # would sweep up anything else the build happened to leave behind,
+          # which is how build artifacts got committed here once before.
+          git add VERSIONS.json vendor/libpng vendor/zstd
           git commit -m "chore: bump libpng ${{ steps.latest.outputs.png_ver }} / zstd ${{ steps.latest.outputs.zstd_ver }}, rebuild pxl"
           git push
 

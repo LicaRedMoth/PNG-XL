@@ -26,16 +26,17 @@ if(PXL_SANITIZE AND NOT MSVC)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
-# Build against local libpng-1.6.58/ and zstd-1.5.7/ sources instead of the
-# system libraries. Used by CI for reproducible, version-pinned rebuilds.
+# Build against the git-submoduled vendor/libpng/ and vendor/zstd/ sources
+# instead of the system libraries. Used by CI for reproducible, version-
+# pinned rebuilds.
 option(PXL_VENDORED "Build against bundled libpng/zstd sources" OFF)
 
 #-----------------------------------------------------------------------------
 # Dependencies
 #-----------------------------------------------------------------------------
 if(PXL_VENDORED)
-    set(PXL_PNG_DIR  "${CMAKE_SOURCE_DIR}/libpng-1.6.58" CACHE PATH "libpng source dir")
-    set(PXL_ZSTD_DIR "${CMAKE_SOURCE_DIR}/zstd-1.5.7"    CACHE PATH "zstd source dir")
+    set(PXL_PNG_DIR  "${CMAKE_SOURCE_DIR}/vendor/libpng" CACHE PATH "libpng source dir")
+    set(PXL_ZSTD_DIR "${CMAKE_SOURCE_DIR}/vendor/zstd"   CACHE PATH "zstd source dir")
 
     # Vendored deps are static, but libpxl.so links them in, so they must be
     # position-independent.

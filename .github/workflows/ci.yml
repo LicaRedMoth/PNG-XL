@@ -24,6 +24,8 @@ jobs:
     name: build (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: Install build dependencies
         run: |
