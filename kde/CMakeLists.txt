@@ -29,6 +29,7 @@ add_library(kimg_pxl MODULE
     kimg_pxl.cpp
     pxl_handler.cpp
 )
+set_target_properties(kimg_pxl PROPERTIES PREFIX "")
 target_link_libraries(kimg_pxl PRIVATE Qt6::Gui PkgConfig::PXLCORE)
 
 install(TARGETS kimg_pxl DESTINATION "${KDE_INSTALL_QTPLUGINDIR}/imageformats")
