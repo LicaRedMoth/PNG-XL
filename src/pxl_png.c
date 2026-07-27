@@ -10,17 +10,23 @@
     into the output bytes -- see pxl_meta.c.
 
     Canonicalization on read:
-      - palette images are expanded to RGB(A);
+      - indexed (color type 3) images are kept indexed: the PLTE chunk becomes
+        img.palette, tRNS becomes img.palette_alpha, and the samples stay as
+        raw indices at their original 1/2/4/8-bit depth. Expanding them to RGB
+        would still be lossless in color, but it would silently change the
+        image's PNG type, so re-encoding could never reproduce the original
+        file. The format's promise is the whole file back, palette included;
       - grayscale below 8 bits is expanded to 8;
-      - a tRNS chunk is expanded to a real alpha channel.
-    The result is always 1 (G), 2 (GA), 3 (RGB) or 4 (RGBA) channels at 8 or
-    16 bits per channel.
+      - a tRNS chunk on a non-indexed image is expanded to a real alpha channel.
+    The result is either an indexed image (1 channel of indices plus a palette)
+    or 1 (G), 2 (GA), 3 (RGB), 4 (RGBA) channels at 8 or 16 bits per channel.
 
     Byte order: 16-bit samples are kept in PNG's native big-endian order both
     in memory and in the .pxl payload (we never call png_set_swap). This makes
     the round-trip bit-exact and independent of host endianness.
 */
 #include "pxl_png.h"
+#include "pxl_format.h" /* PXL_MAX_PALETTE */
 #include "pxl_meta.h"
 #include "pxl_pngio.h"
 
@@ -33,6 +39,48 @@
 /*----------------------------------------------------------------------------
   Load
 ----------------------------------------------------------------------------*/
+
+/** Copy PLTE/tRNS from an indexed PNG into \p img.
+
+    palette holds PaletteCount RGB triples; palette_alpha holds the first
+    PaletteAlphaCount entries' alpha. PNG allows tRNS to be shorter than PLTE
+    (missing entries are opaque), and we keep that shortened form verbatim so
+    the chunk is reproduced byte for byte on write.
+
+    \return 1 on success, 0 if the palette is malformed or allocation fails.
+            Caller must longjmp/bail on 0; img keeps ownership of what it got. */
+static int load_palette(png_structp png, png_infop info, pxl_image* img)
+{
+    png_colorp pal = NULL;
+    int n = 0, i;
+
+    if (!png_get_PLTE(png, info, &pal, &n) || !pal || n <= 0 ||
+        (unsigned)n > PXL_MAX_PALETTE) {
+        return 0;
+    }
+    img->palette.data = (unsigned char*)malloc((size_t)n * 3u);
+    if (!img->palette.data) { return 0; }
+    img->palette.size = (size_t)n * 3u;
+    for (i = 0; i < n; ++i) {
+        img->palette.data[i * 3 + 0] = pal[i].red;
+        img->palette.data[i * 3 + 1] = pal[i].green;
+        img->palette.data[i * 3 + 2] = pal[i].blue;
+    }
+
+    if (png_get_valid(png, info, PNG_INFO_tRNS)) {
+        png_bytep alpha = NULL;
+        int n_alpha = 0;
+        if (png_get_tRNS(png, info, &alpha, &n_alpha, NULL) && alpha &&
+            n_alpha > 0) {
+            if (n_alpha > n) { n_alpha = n; } /* tRNS may not exceed PLTE */
+            img->palette_alpha.data = (unsigned char*)malloc((size_t)n_alpha);
+            if (!img->palette_alpha.data) { return 0; }
+            memcpy(img->palette_alpha.data, alpha, (size_t)n_alpha);
+            img->palette_alpha.size = (size_t)n_alpha;
+        }
+    }
+    return 1;
+}
 
 pxl_image pxl_load_png(const char* path)
 {
@@ -47,6 +95,7 @@ pxl_image pxl_load_png(const char* path)
     int bit_depth, color_type;
     uint8_t channels, bpc;
     size_t stride, size;
+    int indexed;
 
     memset(&img, 0, sizeof(img));
 
@@ -81,27 +130,42 @@ pxl_image pxl_load_png(const char* path)
 
     png_get_IHDR(png, info, &w, &h, &bit_depth, &color_type, NULL, NULL, NULL);
 
-    if (color_type == PNG_COLOR_TYPE_PALETTE) {
-        png_set_palette_to_rgb(png);
-    }
-    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
-        png_set_expand_gray_1_2_4_to_8(png);
-    }
-    if (png_get_valid(png, info, PNG_INFO_tRNS)) {
-        png_set_tRNS_to_alpha(png);
+    indexed = (color_type == PNG_COLOR_TYPE_PALETTE);
+
+    if (indexed) {
+        /* Copy PLTE (and tRNS as per-entry alpha) out before any transform.
+           No png_set_* expansion here: the indices are the pixel data. */
+        if (!load_palette(png, info, &img)) { png_longjmp(png, 1); }
+    } else {
+        if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
+            png_set_expand_gray_1_2_4_to_8(png);
+        }
+        if (png_get_valid(png, info, PNG_INFO_tRNS)) {
+            png_set_tRNS_to_alpha(png);
+        }
     }
     /* Keep 16-bit big-endian (PNG native): no png_set_swap. */
     png_read_update_info(png, info);
 
     bit_depth = png_get_bit_depth(png, info);
     channels  = (uint8_t)png_get_channels(png, info);
-    bpc       = (uint8_t)(bit_depth / 8);
+    bpc       = (uint8_t)(bit_depth == 16 ? 2 : 1);
 
-    if ((bpc != 1 && bpc != 2) || channels < 1 || channels > 4) {
+    if (indexed) {
+        /* An index is a single sample, at most 8 bits deep. */
+        if (channels != 1 || bit_depth > 8) { png_longjmp(png, 1); }
+        img.bit_depth = (uint8_t)bit_depth;
+    } else if ((bit_depth != 8 && bit_depth != 16) ||
+               channels < 1 || channels > 4) {
         png_longjmp(png, 1);
     }
 
-    stride = (size_t)w * channels * bpc;
+    /* Sub-byte indices are bit-packed MSB-first, exactly as PNG stores them,
+       so let libpng state the row length rather than assuming whole bytes. */
+    stride = png_get_rowbytes(png, info);
+    if (stride < (size_t)((w * (png_uint_32)channels * bit_depth + 7u) / 8u)) {
+        png_longjmp(png, 1);
+    }
     size = stride * h;
     img.buffer.data = (unsigned char*)malloc(size ? size : 1);
     if (!img.buffer.data) { png_longjmp(png, 1); }
@@ -151,10 +215,29 @@ int pxl_save_png(const char* path, const pxl_image* img)
     int color_type, ok = 0;
     png_uint_32 y;
     size_t stride;
+    int indexed, depth;
+    unsigned pal_count;
+    png_color pal[PXL_MAX_PALETTE];
 
     if (!img || !img->buffer.data) { return 0; }
     if (img->bytes_per_channel != 1 && img->bytes_per_channel != 2) { return 0; }
-    switch (img->channels) {
+
+    indexed   = pxl_is_indexed(img);
+    pal_count = pxl_palette_count(img);
+    depth     = pxl_bit_depth(img);
+
+    if (indexed) {
+        /* Indices are one sub-byte-or-8-bit sample; the depth bounds the
+           palette (a 4-bit index cannot address entry 17). */
+        if (img->channels != 1 || img->bytes_per_channel != 1) { return 0; }
+        if (depth != 1 && depth != 2 && depth != 4 && depth != 8) { return 0; }
+        if (pal_count == 0 || pal_count > (1u << depth)) { return 0; }
+        if (img->palette_alpha.size > pal_count) { return 0; }
+        color_type = PNG_COLOR_TYPE_PALETTE;
+    } else if (depth != 8 && depth != 16) {
+        /* Sub-byte gray has no color_type of its own here; expand first. */
+        return 0;
+    } else switch (img->channels) {
         case 1: color_type = PNG_COLOR_TYPE_GRAY;       break;
         case 2: color_type = PNG_COLOR_TYPE_GRAY_ALPHA; break;
         case 3: color_type = PNG_COLOR_TYPE_RGB;        break;
@@ -178,13 +261,31 @@ int pxl_save_png(const char* path, const pxl_image* img)
 
     png_set_write_fn(png, &writer, pxl_png_write_mem, pxl_png_flush_mem);
     png_set_IHDR(png, info, img->width, img->height,
-                 img->bytes_per_channel * 8, color_type,
+                 depth, color_type,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
                  PNG_FILTER_TYPE_DEFAULT);
+    if (indexed) {
+        unsigned i;
+        for (i = 0; i < pal_count; ++i) {
+            pal[i].red   = img->palette.data[i * 3 + 0];
+            pal[i].green = img->palette.data[i * 3 + 1];
+            pal[i].blue  = img->palette.data[i * 3 + 2];
+        }
+        png_set_PLTE(png, info, pal, (int)pal_count);
+        if (img->palette_alpha.size > 0) {
+            /* libpng copies the array; it does not retain the pointer. */
+            png_set_tRNS(png, info, img->palette_alpha.data,
+                         (int)img->palette_alpha.size, NULL);
+        }
+    }
     png_write_info(png, info);
     /* 16-bit samples already big-endian (PNG native): no swap. */
 
-    stride = (size_t)img->width * img->channels * img->bytes_per_channel;
+    /* Bit-packed rows for sub-byte indices; whole samples otherwise. */
+    stride = pxl_row_bytes(img);
+    if (stride == 0 || img->buffer.size < stride * (size_t)img->height) {
+        png_longjmp(png, 1); /* buffer too small for the stated geometry */
+    }
     rows = (png_bytep*)malloc(sizeof(png_bytep) * img->height);
     if (!rows) { png_longjmp(png, 1); }
     for (y = 0; y < img->height; ++y) {

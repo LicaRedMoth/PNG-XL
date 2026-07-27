@@ -188,7 +188,16 @@ static int cmd_info(const char* in)
     printf("  format version : %u\n", h.version);
     printf("  dimensions     : %u x %u\n", h.width, h.height);
     printf("  channels       : %u\n", h.channels);
-    printf("  bit depth      : %u-bit\n", h.bytes_per_channel * 8);
+    printf("  bit depth      : %u-bit\n", h.bit_depth);
+    if (h.palette_count) {
+        printf("  palette        : %u entries", h.palette_count);
+        if (h.palette_alpha_count) {
+            printf(" (+%u alpha)", h.palette_alpha_count);
+        }
+        printf("\n");
+    } else {
+        printf("  palette        : none (truecolor/grayscale)\n");
+    }
     printf("  color filter   : %s\n",
            h.color_filter == PXL_FILTER_BCIF     ? "BCIF (YUV + planes)" :
            h.color_filter == PXL_FILTER_ADAPTIVE ? "adaptive (PNG-style per-row)" :

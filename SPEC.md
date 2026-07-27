@@ -30,7 +30,9 @@ samples is defined separately in section 4.)
 
 ```
 +--------------------+  offset 0
-|      Header        |  24 bytes
+|      Header        |  28 bytes
++--------------------+
+|  Palette section   |  PaletteCount*3 + PaletteAlphaCount bytes (may be 0)
 +--------------------+
 |   Metadata block   |  MetaByteCount bytes (may be 0)
 +--------------------+
@@ -44,39 +46,64 @@ samples is defined separately in section 4.)
 |-------:|-----:|-----------------|-------|
 | 0  | 4 | `Magic`           | ASCII `"PXL1"` = `0x50 0x58 0x4C 0x31` |
 | 4  | 1 | `Version`         | `1` |
-| 5  | 1 | `Channels`        | `1`=Gray, `2`=Gray+Alpha, `3`=RGB, `4`=RGBA |
-| 6  | 1 | `BytesPerChannel` | `1` (8-bit) or `2` (16-bit) |
+| 5  | 1 | `Channels`        | `1`=Gray **or indexed**, `2`=Gray+Alpha, `3`=RGB, `4`=RGBA |
+| 6  | 1 | `BitDepth`        | bits per channel: `1`, `2`, `4`, `8` or `16` |
 | 7  | 1 | `ColorFilter`     | `0`=DELTA, `1`=BCIF, `2`=ADAPTIVE (section 5) |
 | 8  | 4 | `Width`           | pixels, uint32 LE, ≥ 1 |
 | 12 | 4 | `Height`          | pixels, uint32 LE, ≥ 1 |
 | 16 | 4 | `RawByteCount`    | uint32 LE, size of the **filtered** stream (= decompressed frame size) |
 | 20 | 4 | `MetaByteCount`   | uint32 LE, size of the metadata block (may be 0) |
+| 24 | 2 | `PaletteCount`      | uint16 LE, `0` = not indexed, else `1..256` entries |
+| 26 | 2 | `PaletteAlphaCount` | uint16 LE, `0..PaletteCount` |
 
 The `Magic` identifies the container family; the `Version` byte exists so a
 future revision can change this layout. This is the only version defined; a
 decoder MUST reject any other `Version` value.
+
+`Channels == 1` with `PaletteCount > 0` means **indexed color**: each sample is
+a palette index, not a gray level. Sub-byte `BitDepth` values (`1`, `2`, `4`)
+are only meaningful for indexed and grayscale images, matching PNG.
 
 ### 2.2 Invariants a decoder MUST enforce
 
 - `Magic` equals `"PXL1"`.
 - `Version` == 1.
 - `Channels` ∈ {1, 2, 3, 4}.
-- `BytesPerChannel` ∈ {1, 2}.
-- `ColorFilter` ∈ {0, 1, 2}; `1` (BCIF) requires `BytesPerChannel == 1` and
+- `BitDepth` ∈ {1, 2, 4, 8, 16}; values below 8 require `Channels == 1`.
+- `ColorFilter` ∈ {0, 1, 2}; `1` (BCIF) requires `BitDepth == 8` and
   `Channels ∈ {3, 4}`.
-- `PixelBytes = Channels × BytesPerChannel`, and `Width × Height × PixelBytes`
+- `PaletteCount` ≤ 256; if nonzero then `Channels == 1`.
+- `PaletteAlphaCount` ≤ `PaletteCount`.
+- `RowBytes = ceil(Width × Channels × BitDepth / 8)`, and `RowBytes × Height`
   is nonzero.
 - `RawByteCount` equals the filtered-stream size for the chosen filter:
-  - DELTA / BCIF: `Width × Height × PixelBytes`;
-  - ADAPTIVE: `Height × (1 + Width × PixelBytes)`.
+  - DELTA / BCIF: `RowBytes × Height`;
+  - ADAPTIVE: `Height × (1 + RowBytes)`.
 - The zstd frame decompresses to exactly `RawByteCount` bytes.
 
 If any invariant fails, the file is invalid and MUST be rejected.
 
-### 2.3 Frame offset
+### 2.3 Palette section
+
+Present only when `PaletteCount > 0`, immediately after the header:
 
 ```
-FrameOffset = 24 + MetaByteCount
+PaletteBytes = PaletteCount * 3 + PaletteAlphaCount
+```
+
+- First `PaletteCount × 3` bytes: entries as `R, G, B` triplets, in index order.
+- Then `PaletteAlphaCount` bytes: alpha for entries `0 .. PaletteAlphaCount-1`.
+  Entries beyond that are fully opaque (255). This mirrors PNG `tRNS` for
+  color type 3, which may be shorter than `PLTE`.
+
+The palette is **structural, not metadata**: an indexed frame cannot be decoded
+to color without it, so it is stored in the container rather than in the opaque
+metadata block. It is stored uncompressed (at most 1024 bytes).
+
+### 2.4 Frame offset
+
+```
+FrameOffset = 28 + PaletteBytes + MetaByteCount
 ```
 The zstd frame occupies `[FrameOffset, EndOfFile)`.
 
@@ -102,9 +129,10 @@ record := ChunkType[4] · DataLength[4, LE] · Data[DataLength]
   `cICP`, `gAMA`, `tEXt`).
 - Records repeat until the block is consumed.
 
-Chunks tied to the original pixel layout — `PLTE`, `tRNS`, `sBIT`, `bKGD`,
-`hIST` — are **not** stored, because the pixel canonicalization done by a PNG
-front end (palette / transparency / sub-8-bit expansion) makes them invalid.
+`PLTE` and `tRNS` are **not** stored here: for indexed images they are carried
+structurally in the palette section (section 2.3), which is what makes the
+indexed round-trip lossless. `sBIT`, `bKGD` and `hIST` are **not** stored,
+because they are tied to a pixel layout a front end may canonicalize.
 Structural chunks (`IHDR`, `IDAT`, `IEND`) are never stored.
 
 A different application MAY define its own metadata-block contents; the
@@ -115,9 +143,15 @@ container only mandates its length via `MetaByteCount`.
 ## 4. Pixel model
 
 - Pixels are row-major, top-to-bottom, left-to-right, tightly packed. Row
-  stride is exactly `Width × Channels × BytesPerChannel`; there is no padding.
-- Channel order is natural: `G`, `GA` (gray, alpha), `RGB`, `RGBA`.
-- For `BytesPerChannel == 2`, each 16-bit sample is stored **big-endian**
+  stride is `RowBytes = ceil(Width × Channels × BitDepth / 8)`.
+- For `BitDepth ∈ {1, 2, 4}` samples are bit-packed **MSB first** within each
+  byte and every row is padded to a whole byte, exactly as in PNG. Padding bits
+  at the end of a row are written as 0 and MUST be ignored on read. For
+  `BitDepth ≥ 8` there is no padding.
+- Channel order is natural: `G`, `GA` (gray, alpha), `RGB`, `RGBA`. For indexed
+  images the single channel holds palette indices, which MUST be
+  `< PaletteCount`.
+- For `BitDepth == 16`, each sample is stored **big-endian**
   (most significant byte first), matching PNG's native sample order. This is
   fixed by the format and independent of host endianness, so files are
   portable and 16-bit round-trips are bit-exact.
@@ -129,7 +163,9 @@ layout, of length `RawByteCount`.
 
 ## 5. Filters
 
-`PixelBytes = Channels × BytesPerChannel` (1..8).
+`PixelBytes = max(1, Channels × BitDepth / 8)` (1..8). For sub-8-bit depths
+`PixelBytes` is 1, so filters operate on packed bytes rather than on samples —
+the same rule PNG uses for its `bpp` offset.
 
 Both filters are applied to the raw pixel buffer to produce a filtered buffer
 of the same length, which is then zstd-compressed. Decoding decompresses first,
@@ -137,7 +173,7 @@ then inverts the filter. The encoder MAY try multiple filters and pick the
 smallest; the chosen one is recorded in `ColorFilter`.
 
 Filter arithmetic is performed on **8-bit lanes** with wraparound modulo 256
-(`uint8_t` add/subtract). For 16-bit images (`BytesPerChannel == 2`) the two
+(`uint8_t` add/subtract). For 16-bit images (`BitDepth == 16`) the two
 bytes of each sample are treated as independent 8-bit lanes of `PixelBytes`;
 i.e. the delta filter operates byte-wise. This is lossless because the inverse
 uses the same modular arithmetic.
@@ -156,7 +192,7 @@ Output stays in interleaved pixel order (no plane split).
 
 ### 5.2 BCIF (ColorFilter = 1) — 8-bit RGB and RGBA only
 
-Permitted only when `BytesPerChannel == 1` and `Channels ∈ {3, 4}`. Combines a
+Permitted only when `BitDepth == 8` and `Channels ∈ {3, 4}`. Combines a
 left-neighbor delta, a reversible color transform (from BCIF), and a split into
 separate color planes. `PlaneSize = Width × Height`. Output planes are
 concatenated: Y-plane, then U-plane, then V-plane (, then A-plane for RGBA).
@@ -330,6 +366,11 @@ value.
 | 28 | 4 | `RawByteCount` | uint32 LE = `FrameCount × canvas_bytes` |
 
 `canvas_bytes = CanvasWidth × CanvasHeight × Channels × BytesPerChannel`.
+
+APXL version `1` carries no palette and no sub-byte depths: every frame is
+byte-aligned with 8 or 16 bits per sample. An indexed still image is expanded to
+`RGB`/`RGBA` before it enters an animation, so `canvas_bytes` above stays exact.
+Indexed animation is left to a future version.
 
 ### 10.2 Body
 

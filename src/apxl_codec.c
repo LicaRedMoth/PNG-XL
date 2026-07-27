@@ -106,6 +106,11 @@ pxl_buffer apxl_encode(const apxl_anim* anim, int zstd_level)
     pb = (unsigned)anim->channels * anim->bytes_per_channel;
     canvas_bytes = (size_t)anim->canvas_w * anim->canvas_h * pb;
     raw_bytes = canvas_bytes * anim->frame_count;
+    /* RawByteCount is a uint32 header field. The geometry limits above allow a
+       much larger product (up to 2^51), so refuse anything that would not
+       survive the round-trip instead of silently truncating the header and
+       emitting a file whose own decoder rejects it. */
+    if (raw_bytes > 0xFFFFFFFFu) { return out; }
     meta_size = (anim->metadata.data && anim->metadata.size) ? anim->metadata.size : 0;
     timing_bytes = (size_t)anim->frame_count * APXL_TIMING_BYTES;
 

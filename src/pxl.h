@@ -38,22 +38,49 @@ typedef struct {
 
 /* Raw (uncompressed) image pixels plus geometry and preserved metadata.
 
-   Pixels are stored row-major, tightly packed: stride == width * channels *
-   bytes_per_channel. 16-bit channels (bytes_per_channel == 2) are stored in
-   PNG-native big-endian byte order, so round-trips are bit-exact.
+   Pixels are stored row-major with stride == pxl_row_bytes(img), which for the
+   common 8/16-bit cases is exactly width * channels * bytes_per_channel.
+   16-bit channels (bytes_per_channel == 2) are stored in PNG-native big-endian
+   byte order, so round-trips are bit-exact.
 
    metadata holds preserved PNG ancillary chunks (EXIF, ICC, cICP, text, etc.)
    serialized as a sequence of [4-byte type][4-byte length LE][data]. It may be
    empty (data == NULL, size == 0). Release it together with buffer via
-   pxl_image_free(). */
+   pxl_image_free().
+
+   Indexed (palette) images set `palette` to 3 bytes per entry (R,G,B) and use
+   channels == 1, where each sample is an index into it. `palette_alpha`, if
+   non-empty, holds one alpha byte per entry (PNG's tRNS for color type 3).
+
+   `bit_depth` carries PNG's sub-byte depths: 1, 2, 4, 8 or 16. Rows are then
+   packed exactly as in PNG -- see pxl_row_bytes(). bit_depth == 0 means "derive
+   from bytes_per_channel" (8 or 16), so code that predates these fields and
+   only sets channels/bytes_per_channel keeps working unchanged. */
 typedef struct {
     pxl_buffer buffer;            /* pixel bytes */
     pxl_buffer metadata;          /* serialized ancillary chunks (may be empty) */
+    pxl_buffer palette;           /* indexed images: 3 bytes/entry RGB, else empty */
+    pxl_buffer palette_alpha;     /* optional 1 byte/entry alpha, else empty */
     uint32_t   width;
     uint32_t   height;
-    uint8_t    channels;          /* 1=G, 2=GA, 3=RGB, 4=RGBA */
+    uint8_t    channels;          /* 1=G or index, 2=GA, 3=RGB, 4=RGBA */
     uint8_t    bytes_per_channel; /* 1 or 2 */
+    uint8_t    bit_depth;         /* 1,2,4,8,16; 0 = bytes_per_channel * 8 */
 } pxl_image;
+
+/* Effective bit depth: bit_depth if set, else bytes_per_channel * 8. */
+uint8_t pxl_bit_depth(const pxl_image* img);
+
+/* Number of palette entries (palette.size / 3), 0 for non-indexed images. */
+unsigned pxl_palette_count(const pxl_image* img);
+
+/* 1 if the image is indexed (has a non-empty palette), else 0. */
+int pxl_is_indexed(const pxl_image* img);
+
+/* Bytes per pixel row, PNG's rule: for depths below 8 the row is bit-packed,
+   most significant bits first, and padded to a whole byte --
+   (width * channels * bit_depth + 7) / 8. Returns 0 for invalid geometry. */
+size_t pxl_row_bytes(const pxl_image* img);
 
 /*----------------------------------------------------------------------------
   Codec: raw pixels <-> .pxl file bytes
@@ -82,8 +109,23 @@ pxl_image pxl_decode(pxl_buffer file);
 /* Release a buffer returned by the library and null it out. */
 void pxl_free(pxl_buffer* buffer);
 
-/* Release both the pixel and metadata buffers of an image. */
+/* Release the pixel, metadata and palette buffers of an image. */
 void pxl_image_free(pxl_image* img);
+
+/*----------------------------------------------------------------------------
+  Palette expansion (convenience for front ends that want real color)
+----------------------------------------------------------------------------*/
+
+/* Expand an indexed or sub-8-bit image into a plain 8-bit image: indexed
+   becomes RGB (3 channels) or RGBA (4, if palette_alpha is present), and
+   1/2/4-bit gray becomes 8-bit gray scaled to the full range, as libpng's
+   png_set_palette_to_rgb / png_set_expand_gray_1_2_4_to_8 do.
+
+   Images that are already 8- or 16-bit non-indexed are returned as a plain deep
+   copy, so callers can use this unconditionally. Metadata is not copied, since
+   chunks such as sBIT and bKGD do not survive the expansion. On success
+   buffer.data != NULL; release with pxl_image_free(). */
+pxl_image pxl_image_expand(const pxl_image* img);
 
 /*----------------------------------------------------------------------------
   Streaming (progressive) decode: emit rows top-to-bottom as bytes arrive
@@ -106,8 +148,8 @@ pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user);
    Returns the number of newly completed rows (>= 0), or -1 on a format error. */
 int pxl_stream_feed(pxl_stream* s, const void* data, size_t len);
 
-/* The progressively filled image. Geometry is valid once the 24-byte header has
-   arrived (buffer.data != NULL then). *rows_ready (if non-NULL) receives how
+/* The progressively filled image. Geometry is valid once the fixed header,
+   palette and metadata have arrived (buffer.data != NULL then). *rows_ready (if non-NULL) receives how
    many top rows are fully decoded; rows below that are not yet valid. Returns
    NULL before the header is complete. */
 const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready);

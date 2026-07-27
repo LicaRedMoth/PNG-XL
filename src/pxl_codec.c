@@ -24,6 +24,106 @@
 #define PXL_MAX_DIM     1000000u
 #define PXL_MAX_PIXELS  ((uint64_t)1 << 28)
 
+uint8_t pxl_bit_depth(const pxl_image* img)
+{
+    if (!img) { return 0; }
+    if (img->bit_depth) { return img->bit_depth; }
+    return (uint8_t)(img->bytes_per_channel * 8u);
+}
+
+unsigned pxl_palette_count(const pxl_image* img)
+{
+    if (!img || !img->palette.data) { return 0; }
+    return (unsigned)(img->palette.size / 3u);
+}
+
+int pxl_is_indexed(const pxl_image* img)
+{
+    return pxl_palette_count(img) > 0;
+}
+
+size_t pxl_row_bytes(const pxl_image* img)
+{
+    if (!img) { return 0; }
+    return pxl_row_bytes_of(img->width, img->channels, pxl_bit_depth(img));
+}
+
+/* Validates the palette section against the image. On success writes the entry
+   and alpha counts. Indexed images are single-channel by construction. */
+static int palette_ok(const pxl_image* img, uint8_t depth,
+                      unsigned* count, unsigned* alpha)
+{
+    unsigned n = pxl_palette_count(img);
+    size_t na = img->palette_alpha.data ? img->palette_alpha.size : 0;
+
+    if (n == 0) {
+        /* No palette: a sub-byte depth is still legal (PNG gray 1/2/4). */
+        if (na != 0) { return 0; } /* alpha without a palette is meaningless */
+        *count = 0;
+        *alpha = 0;
+        return 1;
+    }
+    if (img->palette.size % 3u != 0 || n > PXL_MAX_PALETTE) { return 0; }
+    if (img->channels != 1 || depth > 8) { return 0; }
+    /* Indices must be representable at this depth. */
+    if (depth < 8 && n > (1u << depth)) { return 0; }
+    if (na > n) { return 0; }
+    *count = n;
+    *alpha = (unsigned)na;
+    return 1;
+}
+
+/* Rejects indices that address a palette entry that does not exist.
+
+   This is a hard requirement, not a nicety: consumers (the Qt plugin, the
+   Dolphin thumbnailer, ffmpeg) index the palette directly with the sample
+   value, so an out-of-range index in a crafted or corrupt file would be an
+   out-of-bounds read in *their* address space. A palette shorter than the
+   depth allows (a 5-entry PLTE at 8 bits, which PNG permits) makes that
+   reachable, so the check has to look at every sample.
+
+   `rows` * `row_bytes` is the pixel buffer; at depths below 8 the padding bits
+   at the end of a row are not samples and must not be validated. Returns 1 if
+   every index is < count. */
+static int row_indices_ok(const uint8_t* row, uint32_t width, uint8_t depth,
+                          unsigned count)
+{
+    uint32_t x;
+
+    if (depth == 8) {
+        for (x = 0; x < width; ++x) {
+            if (row[x] >= count) { return 0; }
+        }
+        return 1;
+    }
+    /* Sub-byte depths: unpack MSB-first, ignoring row padding. */
+    {
+        unsigned per_byte = 8u / depth;
+        unsigned mask = (1u << depth) - 1u;
+        for (x = 0; x < width; ++x) {
+            unsigned shift = 8u - depth * (unsigned)(x % per_byte) - depth;
+            if ((unsigned)((row[x / per_byte] >> shift) & mask) >= count) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Whole-buffer form of the above, for the one-shot decoder. */
+static int indices_ok(const uint8_t* pixels, size_t row_bytes, uint32_t width,
+                      uint32_t height, uint8_t depth, unsigned count)
+{
+    uint32_t y;
+    for (y = 0; y < height; ++y) {
+        if (!row_indices_ok(pixels + (size_t)y * row_bytes, width, depth,
+                            count)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Returns 1 if the header geometry is within the decode limits. */
 static int geometry_ok(uint32_t width, uint32_t height, unsigned pixel_bytes)
 {
@@ -39,6 +139,42 @@ static int geometry_ok(uint32_t width, uint32_t height, unsigned pixel_bytes)
     /* With pixels capped at 2^28 and pixel_bytes at 8, width*height*pixel_bytes
        tops out at 2^31 and cannot overflow size_t on any supported target. */
     (void)pixel_bytes;
+    return 1;
+}
+
+/* Filter geometry for one image. The filters work on byte rows, so a sub-byte
+   depth (1/2/4) is filtered as a row of packed bytes: filter_width becomes the
+   packed row length and pixel_bytes becomes 1, which is exactly what PNG does
+   for depths below 8. For 8/16-bit rows this is the old behaviour unchanged. */
+typedef struct {
+    unsigned pixel_bytes;  /* bytes per filter unit (1 for sub-byte depths) */
+    uint32_t filter_width; /* units per row as seen by the filters */
+    size_t   row_bytes;    /* packed bytes per scanline */
+    size_t   raw_bytes;    /* row_bytes * height */
+} pxl_geometry;
+
+/* Returns 1 and fills g on success, 0 if the geometry is invalid or too big. */
+static int geometry_of(uint32_t width, uint32_t height, uint8_t channels,
+                       uint8_t depth, pxl_geometry* g)
+{
+    size_t row = pxl_row_bytes_of(width, channels, depth);
+
+    if (row == 0 || !geometry_ok(width, height, 1)) {
+        return 0;
+    }
+    if (depth >= 8) {
+        g->pixel_bytes = (unsigned)channels * (unsigned)(depth / 8u);
+        g->filter_width = width;
+    } else {
+        g->pixel_bytes = 1;
+        /* Packed rows stay under PXL_MAX_DIM bytes, so this fits uint32_t. */
+        g->filter_width = (uint32_t)row;
+    }
+    if (!geometry_ok(g->filter_width, height, g->pixel_bytes)) {
+        return 0;
+    }
+    g->row_bytes = row;
+    g->raw_bytes = row * (size_t)height;
     return 1;
 }
 
@@ -500,9 +636,12 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
     uint8_t* work = NULL;
     uint8_t* best_frame = NULL;
     uint8_t* file = NULL;
-    size_t pixel_count, raw_bytes, bound, csize = 0, meta_size;
+    size_t raw_bytes, bound, csize = 0, meta_size, palette_bytes;
     size_t max_filtered, filtered_bytes = 0;
     unsigned pixel_bytes;
+    unsigned pal_count, pal_alpha;
+    uint8_t depth;
+    pxl_geometry g;
     uint8_t filter = PXL_FILTER_DELTA;
     uint8_t candidates[3];
     int n_candidates = 0;
@@ -521,10 +660,23 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
     if (img->bytes_per_channel != 1 && img->bytes_per_channel != 2) {
         return out;
     }
-
-    pixel_bytes = (unsigned)img->channels * img->bytes_per_channel;
-    pixel_count = (size_t)img->width * img->height;
-    raw_bytes = pixel_count * pixel_bytes;
+    depth = pxl_bit_depth(img);
+    /* bit_depth and bytes_per_channel must agree: 16-bit samples occupy two
+       bytes, everything else (1/2/4/8) exactly one. */
+    if (img->bytes_per_channel != (depth == 16 ? 2u : 1u)) {
+        return out;
+    }
+    if (!palette_ok(img, depth, &pal_count, &pal_alpha)) {
+        return out;
+    }
+    if (!geometry_of(img->width, img->height, img->channels, depth, &g)) {
+        return out;
+    }
+    pixel_bytes = g.pixel_bytes;
+    raw_bytes = g.raw_bytes;
+    if (img->buffer.size < raw_bytes) {
+        return out; /* caller's buffer is too small for the stated geometry */
+    }
 
     if (zstd_level <= 0) {
         zstd_level = PXL_LEVEL_DEFAULT;
@@ -540,8 +692,8 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
     candidates[n_candidates++] = PXL_FILTER_DELTA;
     /* BCIF splits into color planes, which breaks top-to-bottom streaming, so
        the progressive flag excludes it. */
-    if (!(flags & PXL_ENCODE_PROGRESSIVE) &&
-        choose_filter(img->channels, img->bytes_per_channel) == PXL_FILTER_BCIF) {
+    if (!(flags & PXL_ENCODE_PROGRESSIVE) && pal_count == 0 &&
+        choose_filter(img->channels, (uint8_t)(depth / 8u)) == PXL_FILTER_BCIF) {
         candidates[n_candidates++] = PXL_FILTER_BCIF;
     }
 
@@ -549,7 +701,7 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
        buffer and compress bound to the largest candidate. */
     max_filtered = raw_bytes;
     for (ci = 0; ci < n_candidates; ++ci) {
-        size_t fs = filtered_size(candidates[ci], img->width, img->height, pixel_bytes);
+        size_t fs = filtered_size(candidates[ci], g.filter_width, img->height, pixel_bytes);
         if (fs > max_filtered) { max_filtered = fs; }
     }
     bound = ZSTD_compressBound(max_filtered);
@@ -570,7 +722,7 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
         uint8_t cand = candidates[ci];
         size_t fsize, csz;
         fsize = apply_filter(cand, pixel_bytes, img->buffer.data, filtered,
-                             img->width, img->height);
+                             g.filter_width, img->height);
         if (fsize == 0) {
             continue; /* filter failed (e.g. OOM in adaptive) */
         }
@@ -596,9 +748,10 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
         return out;
     }
 
-    /* Assemble container: 24-byte header + metadata block + zstd frame. */
+    /* Assemble container: header + palette section + metadata block + frame. */
     meta_size = (img->metadata.data && img->metadata.size) ? img->metadata.size : 0;
-    file = (uint8_t*)malloc(PXL_HEADER_BYTES + meta_size + csize);
+    palette_bytes = (size_t)pal_count * 3u + (size_t)pal_alpha;
+    file = (uint8_t*)malloc(PXL_HEADER_BYTES + palette_bytes + meta_size + csize);
     if (!file) {
         free(best);
         return out;
@@ -606,21 +759,30 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
 
     h.version = PXL_VERSION;
     h.channels = img->channels;
-    h.bytes_per_channel = img->bytes_per_channel;
+    h.bit_depth = depth;
     h.color_filter = filter;
     h.width = img->width;
     h.height = img->height;
     h.raw_byte_count = (uint32_t)filtered_bytes; /* size of the filtered stream */
     h.meta_byte_count = (uint32_t)meta_size;
+    h.palette_count = (uint16_t)pal_count;
+    h.palette_alpha_count = (uint16_t)pal_alpha;
     pxl_header_write(file, &h);
-    if (meta_size) {
-        memcpy(file + PXL_HEADER_BYTES, img->metadata.data, meta_size);
+    if (pal_count) {
+        memcpy(file + PXL_HEADER_BYTES, img->palette.data, (size_t)pal_count * 3u);
+        if (pal_alpha) {
+            memcpy(file + PXL_HEADER_BYTES + (size_t)pal_count * 3u,
+                   img->palette_alpha.data, pal_alpha);
+        }
     }
-    memcpy(file + PXL_HEADER_BYTES + meta_size, best, csize);
+    if (meta_size) {
+        memcpy(file + PXL_HEADER_BYTES + palette_bytes, img->metadata.data, meta_size);
+    }
+    memcpy(file + PXL_HEADER_BYTES + palette_bytes + meta_size, best, csize);
     free(best);
 
     out.data = file;
-    out.size = PXL_HEADER_BYTES + meta_size + csize;
+    out.size = PXL_HEADER_BYTES + palette_bytes + meta_size + csize;
     return out;
 }
 
@@ -630,8 +792,9 @@ pxl_image pxl_decode(pxl_buffer file)
     pxl_header h;
     uint8_t* filtered = NULL;
     uint8_t* pixels = NULL;
-    size_t dsize, frame_off, pixel_bytes_total;
+    size_t dsize, frame_off, pixel_bytes_total, palette_bytes;
     unsigned pixel_bytes;
+    pxl_geometry g;
 
     memset(&img, 0, sizeof(img));
 
@@ -639,31 +802,41 @@ pxl_image pxl_decode(pxl_buffer file)
         return img;
     }
 
-    pixel_bytes = (unsigned)h.channels * h.bytes_per_channel;
+    if (!geometry_of(h.width, h.height, h.channels, h.bit_depth, &g)) {
+        return img;
+    }
+    pixel_bytes = g.pixel_bytes;
 
     /* raw_byte_count is the size of the (decompressed) filtered stream, which
        depends on the filter. Validate it against the expected size for this
-       filter/geometry so we never trust the header blindly for allocation.
-       geometry_ok() must run before any width*height arithmetic. */
+       filter/geometry so we never trust the header blindly for allocation. */
     if (h.color_filter > PXL_FILTER_ADAPTIVE ||
-        !geometry_ok(h.width, h.height, pixel_bytes) ||
         (size_t)h.raw_byte_count !=
-            filtered_size(h.color_filter, h.width, h.height, pixel_bytes)) {
+            filtered_size(h.color_filter, g.filter_width, h.height, pixel_bytes)) {
         return img;
     }
-    pixel_bytes_total = (size_t)h.width * h.height * pixel_bytes;
+    pixel_bytes_total = g.raw_bytes;
     /* BCIF is defined only for 8-bit RGB/RGBA; any other geometry with that
-       filter byte is a malformed (or crafted) file. */
+       filter byte is a malformed (or crafted) file. An indexed image never uses
+       it either (its samples are indices, not color). */
     if (h.color_filter == PXL_FILTER_BCIF &&
-        (h.bytes_per_channel != 1 || (h.channels != 3 && h.channels != 4))) {
+        (h.bit_depth != 8 || h.palette_count != 0 ||
+         (h.channels != 3 && h.channels != 4))) {
         return img;
     }
 
-    /* The metadata block sits between the header and the zstd frame. */
-    frame_off = PXL_HEADER_BYTES + h.meta_byte_count;
-    if (frame_off > file.size) {
+    /* Palette section, then metadata block, then the zstd frame. Each offset is
+       checked against the remaining bytes so the sum can never wrap size_t. */
+    palette_bytes = pxl_header_palette_bytes(&h);
+    if (file.size < PXL_HEADER_BYTES ||
+        palette_bytes > file.size - PXL_HEADER_BYTES) {
         return img;
     }
+    frame_off = PXL_HEADER_BYTES + palette_bytes;
+    if (h.meta_byte_count > file.size - frame_off) {
+        return img;
+    }
+    frame_off += h.meta_byte_count;
 
     filtered = (uint8_t*)malloc(h.raw_byte_count);
     if (!filtered) {
@@ -685,18 +858,56 @@ pxl_image pxl_decode(pxl_buffer file)
     }
 
     if (!reverse_filter(h.color_filter, pixel_bytes, filtered, dsize, pixels,
-                        h.width, h.height)) {
+                        g.filter_width, h.height)) {
         free(filtered);
         free(pixels);
         return img;
     }
     free(filtered);
 
-    /* Copy out the preserved metadata block, if present. */
+    /* Copy out the palette. It is structural: without it an indexed image is
+       undecodable, so OOM here fails the whole decode (unlike metadata). */
+    if (palette_bytes) {
+        size_t rgb = (size_t)h.palette_count * 3;
+        unsigned char* pal = (unsigned char*)malloc(rgb);
+        unsigned char* pa  = NULL;
+        if (h.palette_alpha_count) {
+            pa = (unsigned char*)malloc(h.palette_alpha_count);
+        }
+        if (!pal || (h.palette_alpha_count && !pa)) {
+            free(pal);
+            free(pa);
+            free(pixels);
+            return img;
+        }
+        memcpy(pal, file.data + PXL_HEADER_BYTES, rgb);
+        img.palette.data = pal;
+        img.palette.size = rgb;
+        if (pa) {
+            memcpy(pa, file.data + PXL_HEADER_BYTES + rgb, h.palette_alpha_count);
+            img.palette_alpha.data = pa;
+            img.palette_alpha.size = h.palette_alpha_count;
+        }
+    }
+
+    /* With the palette known, verify no sample points past its end. */
+    if (h.palette_count &&
+        !indices_ok(pixels, g.row_bytes, h.width, h.height, h.bit_depth,
+                    h.palette_count)) {
+        pxl_free(&img.palette);
+        pxl_free(&img.palette_alpha);
+        free(pixels);
+        memset(&img, 0, sizeof(img));
+        return img;
+    }
+
+    /* Copy out the preserved metadata block, if present. It sits after the
+       palette section. */
     if (h.meta_byte_count) {
         unsigned char* md = (unsigned char*)malloc(h.meta_byte_count);
         if (md) {
-            memcpy(md, file.data + PXL_HEADER_BYTES, h.meta_byte_count);
+            memcpy(md, file.data + PXL_HEADER_BYTES + palette_bytes,
+                   h.meta_byte_count);
             img.metadata.data = md;
             img.metadata.size = h.meta_byte_count;
         }
@@ -708,7 +919,8 @@ pxl_image pxl_decode(pxl_buffer file)
     img.width = h.width;
     img.height = h.height;
     img.channels = h.channels;
-    img.bytes_per_channel = h.bytes_per_channel;
+    img.bytes_per_channel = (uint8_t)(h.bit_depth == 16 ? 2 : 1);
+    img.bit_depth = h.bit_depth;
     return img;
 }
 
@@ -716,8 +928,8 @@ pxl_image pxl_decode(pxl_buffer file)
   Streaming (progressive) decode
 
   The container is parsed with a small state machine so the caller can push
-  bytes in arbitrary chunks: 24-byte header, then the metadata block, then the
-  zstd frame fed through ZSTD_decompressStream.
+  bytes in arbitrary chunks: the fixed header, then the palette section, then
+  the metadata block, then the zstd frame fed through ZSTD_decompressStream.
 
   Rows are reconstructed as soon as their filtered bytes exist:
     - DELTA:    each row is self-contained (prev resets per row);
@@ -726,10 +938,11 @@ pxl_image pxl_decode(pxl_buffer file)
                 byte arrives, so those rows are emitted from pxl_stream_finish.
 ----------------------------------------------------------------------------*/
 
-#define PXL_ST_HEADER 0
-#define PXL_ST_META   1
-#define PXL_ST_FRAME  2
-#define PXL_ST_ERROR  (-1)
+#define PXL_ST_HEADER  0
+#define PXL_ST_PALETTE 1
+#define PXL_ST_META    2
+#define PXL_ST_FRAME   3
+#define PXL_ST_ERROR   (-1)
 
 /* Matches the encoder's window (APXL uses 2^27); still images never need more,
    but raising the limit costs nothing and keeps the two paths consistent. */
@@ -743,6 +956,10 @@ struct pxl_stream {
     uint8_t    hdr[PXL_HEADER_BYTES];
     size_t     hdr_have;
     pxl_header h;
+    pxl_geometry g;
+
+    /* Palette section, consumed between the header and the metadata block. */
+    size_t     pal_have;
 
     unsigned   pixel_bytes;
     size_t     row_stride;   /* pixel bytes per row */
@@ -785,6 +1002,15 @@ static int stream_emit_rows(pxl_stream* s)
             unpack_delta_row(in, cur, s->h.width, s->pixel_bytes);
         }
 
+        /* Check before the callback: the consumer will use these samples as
+           palette subscripts the moment it sees them. */
+        if (s->h.palette_count &&
+            !row_indices_ok(cur, s->h.width, s->h.bit_depth,
+                            s->h.palette_count)) {
+            s->state = PXL_ST_ERROR;
+            return -1;
+        }
+
         if (s->cb) {
             s->cb(s->user, s->rows_done, cur, s->row_stride);
         }
@@ -802,22 +1028,25 @@ static int stream_begin(pxl_stream* s)
     if (!pxl_header_read(s->hdr, PXL_HEADER_BYTES, &s->h)) {
         return 0;
     }
-    s->pixel_bytes = (unsigned)s->h.channels * s->h.bytes_per_channel;
-    /* geometry_ok() must run before any width*height arithmetic. */
+    if (!geometry_of(s->h.width, s->h.height, s->h.channels, s->h.bit_depth,
+                     &s->g)) {
+        return 0;
+    }
+    s->pixel_bytes = s->g.pixel_bytes;
     if (s->h.color_filter > PXL_FILTER_ADAPTIVE ||
-        !geometry_ok(s->h.width, s->h.height, s->pixel_bytes) ||
         (size_t)s->h.raw_byte_count !=
-            filtered_size(s->h.color_filter, s->h.width, s->h.height, s->pixel_bytes)) {
+            filtered_size(s->h.color_filter, s->g.filter_width, s->h.height,
+                          s->pixel_bytes)) {
         return 0;
     }
     if (s->h.color_filter == PXL_FILTER_BCIF &&
-        (s->h.bytes_per_channel != 1 ||
+        (s->h.bit_depth != 8 || s->h.palette_count != 0 ||
          (s->h.channels != 3 && s->h.channels != 4))) {
         return 0;
     }
 
-    pixels_total = (size_t)s->h.width * s->h.height * s->pixel_bytes;
-    s->row_stride = (size_t)s->h.width * s->pixel_bytes;
+    pixels_total = s->g.raw_bytes;
+    s->row_stride = (size_t)s->g.filter_width * s->pixel_bytes;
     s->frow_stride = (s->h.color_filter == PXL_FILTER_ADAPTIVE)
                          ? s->row_stride + 1 : s->row_stride;
 
@@ -830,7 +1059,8 @@ static int stream_begin(pxl_stream* s)
     s->img.width = s->h.width;
     s->img.height = s->h.height;
     s->img.channels = s->h.channels;
-    s->img.bytes_per_channel = s->h.bytes_per_channel;
+    s->img.bytes_per_channel = (uint8_t)(s->h.bit_depth == 16 ? 2 : 1);
+    s->img.bit_depth = s->h.bit_depth;
 
     s->ds = ZSTD_createDStream();
     if (!s->ds) {
@@ -847,6 +1077,24 @@ static int stream_begin(pxl_stream* s)
             return 0;
         }
         s->img.metadata.size = s->h.meta_byte_count;
+    }
+
+    /* The palette is filled in by PXL_ST_PALETTE as the bytes arrive; its
+       buffers must exist (and be sized) before that. */
+    if (s->h.palette_count) {
+        s->img.palette.data = (unsigned char*)malloc((size_t)s->h.palette_count * 3);
+        if (!s->img.palette.data) {
+            return 0;
+        }
+        s->img.palette.size = (size_t)s->h.palette_count * 3;
+        if (s->h.palette_alpha_count) {
+            s->img.palette_alpha.data =
+                (unsigned char*)malloc(s->h.palette_alpha_count);
+            if (!s->img.palette_alpha.data) {
+                return 0;
+            }
+            s->img.palette_alpha.size = s->h.palette_alpha_count;
+        }
     }
     return 1;
 }
@@ -889,6 +1137,34 @@ int pxl_stream_feed(pxl_stream* s, const void* data, size_t len)
             if (!stream_begin(s)) {
                 s->state = PXL_ST_ERROR;
                 return -1;
+            }
+            s->state = PXL_ST_PALETTE;
+            continue;
+        }
+
+        if (s->state == PXL_ST_PALETTE) {
+            size_t total_pal = pxl_header_palette_bytes(&s->h);
+            size_t need = total_pal - s->pal_have;
+            size_t take = len < need ? len : need;
+            while (take) {
+                /* RGB triples first, then the alpha bytes. */
+                size_t rgb = s->img.palette.size;
+                size_t n;
+                if (s->pal_have < rgb) {
+                    n = rgb - s->pal_have;
+                    if (n > take) { n = take; }
+                    memcpy(s->img.palette.data + s->pal_have, p, n);
+                } else {
+                    n = take;
+                    memcpy(s->img.palette_alpha.data + (s->pal_have - rgb), p, n);
+                }
+                s->pal_have += n;
+                p += n;
+                len -= n;
+                take -= n;
+            }
+            if (s->pal_have < total_pal) {
+                break;
             }
             s->state = PXL_ST_META;
             continue;

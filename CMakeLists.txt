@@ -51,6 +51,12 @@ if(PXL_VENDORED)
     set(PXL_ZSTD_INCLUDE "${PXL_ZSTD_DIR}/lib")
 
     # libpng (depends on system zlib).
+    # pkg_check_modules(PNG ...) in the non-vendored branch writes an internal
+    # cache entry named PNG_PREFIX (a filesystem prefix such as /usr). Vendored
+    # libpng uses the same name for its API symbol prefix, so a leftover cache
+    # entry from a previous non-vendored configure corrupts pnglibconf.h. Force
+    # it back to the standard "no prefix" value.
+    set(PNG_PREFIX "" CACHE STRING "" FORCE)
     set(PNG_SHARED OFF CACHE BOOL "" FORCE)
     set(PNG_STATIC ON  CACHE BOOL "" FORCE)
     set(PNG_TESTS  OFF CACHE BOOL "" FORCE)
