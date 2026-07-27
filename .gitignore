@@ -25,3 +25,12 @@ pxl_interop_tmp.png
 
 # Large local test assets (kept out of the repo; referenced by path)
 /4YOU/
+# Benchmark corpora and the video source: ~250 MB total, fetched locally.
+# bench/README.md says where each one comes from.
+/tests/data/Kodak-Lossless-True-Color-Image-Suite/
+/tests/data/The-official-test-suite-for-PNG/
+/tests/data/USC-SIPI-Image-Database/
+/tests/data/Video_24fps.mp4
+/tests/data/Video_24fps_96f.apng
+/tests/data/Photorealistic_cover.png
+/tests/data/Photorealistic_cover_fs8.png
