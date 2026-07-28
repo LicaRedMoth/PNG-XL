@@ -48,7 +48,7 @@ samples is defined separately in section 4.)
 | 4  | 1 | `Version`         | `1` |
 | 5  | 1 | `Channels`        | `1`=Gray **or indexed**, `2`=Gray+Alpha, `3`=RGB, `4`=RGBA |
 | 6  | 1 | `BitDepth`        | bits per channel: `1`, `2`, `4`, `8` or `16` |
-| 7  | 1 | `ColorFilter`     | `0`=DELTA, `1`=BCIF, `2`=ADAPTIVE (section 5) |
+| 7  | 1 | `ColorFilter`     | `0`=DELTA, `1`=BCIF, `2`=ADAPTIVE, `3`=NONE (section 5) |
 | 8  | 4 | `Width`           | pixels, uint32 LE, ≥ 1 |
 | 12 | 4 | `Height`          | pixels, uint32 LE, ≥ 1 |
 | 16 | 4 | `RawByteCount`    | uint32 LE, size of the **filtered** stream (= decompressed frame size) |
@@ -70,14 +70,15 @@ are only meaningful for indexed and grayscale images, matching PNG.
 - `Version` == 1.
 - `Channels` ∈ {1, 2, 3, 4}.
 - `BitDepth` ∈ {1, 2, 4, 8, 16}; values below 8 require `Channels == 1`.
-- `ColorFilter` ∈ {0, 1, 2}; `1` (BCIF) requires `BitDepth == 8` and
-  `Channels ∈ {3, 4}`.
+- `ColorFilter` ∈ {0, 1, 2, 3}; `1` (BCIF) requires `BitDepth == 8` and
+  `Channels ∈ {3, 4}`. IDs `4..255` are reserved for later revisions and MUST
+  be rejected by this version.
 - `PaletteCount` ≤ 256; if nonzero then `Channels == 1`.
 - `PaletteAlphaCount` ≤ `PaletteCount`.
 - `RowBytes = ceil(Width × Channels × BitDepth / 8)`, and `RowBytes × Height`
   is nonzero.
 - `RawByteCount` equals the filtered-stream size for the chosen filter:
-  - DELTA / BCIF: `RowBytes × Height`;
+  - DELTA / BCIF / NONE: `RowBytes × Height`;
   - ADAPTIVE: `Height × (1 + RowBytes)`.
 - The zstd frame decompresses to exactly `RawByteCount` bytes.
 
@@ -167,8 +168,8 @@ layout, of length `RawByteCount`.
 `PixelBytes` is 1, so filters operate on packed bytes rather than on samples —
 the same rule PNG uses for its `bpp` offset.
 
-Both filters are applied to the raw pixel buffer to produce a filtered buffer
-of the same length, which is then zstd-compressed. Decoding decompresses first,
+Filters are applied to the raw pixel buffer to produce a filtered buffer, which
+is then zstd-compressed. All filters except ADAPTIVE preserve the input length. Decoding decompresses first,
 then inverts the filter. The encoder MAY try multiple filters and pick the
 smallest; the chosen one is recorded in `ColorFilter`.
 
@@ -270,7 +271,19 @@ The encoder MAY choose the per-row filter type freely (libpxl uses PNG's
 minimum-sum-of-absolute-residuals heuristic). A decoder MUST honor the stored
 type byte for each row and MUST reject any type byte greater than 4.
 
-### 5.4 Progressive (top-to-bottom) decodability
+### 5.4 NONE (ColorFilter = 3) — any format
+
+No transform: the filtered buffer is a byte-for-byte copy of the raw pixel
+buffer, of length `RowBytes × Height`.
+
+This exists because differencing is not always a win. On indexed images the
+samples are palette *labels*, not magnitudes, so the difference between two
+neighboring indices is unrelated to the difference between the colors they name:
+a flat region of one color is a run of one repeated index, which zstd matches
+directly, while any delta filter turns it into noise. NONE is also the cheapest
+possible decode path.
+
+### 5.5 Progressive (top-to-bottom) decodability
 
 `ColorFilter` also determines whether a file can be decoded **incrementally,
 row by row, as its bytes arrive** — the property a web client needs to paint an
@@ -280,15 +293,16 @@ image while it downloads:
 |---|---|---|
 | 0 DELTA | yes | `prev` resets per row, so every row is self-contained |
 | 2 ADAPTIVE | yes | a row depends only on the row above, already reconstructed |
+| 3 NONE | yes | rows are independent; there is nothing to invert |
 | 1 BCIF | **no** | the plane split interleaves all rows; no row is complete until the last plane byte arrives |
 
-A decoder MAY therefore reconstruct row `y` of a DELTA or ADAPTIVE file as soon
+A decoder MAY therefore reconstruct row `y` of a DELTA, ADAPTIVE or NONE file as soon
 as the filtered bytes for that row have been decompressed, without waiting for
 the rest of the zstd frame. Granularity is the zstd block (at most 128 KiB of
 decompressed output), not the byte.
 
 An encoder that wants to guarantee this property MUST restrict itself to
-`ColorFilter ∈ {0, 2}`. This is a purely encoder-side choice: no header field
+`ColorFilter ∈ {0, 2, 3}`. This is a purely encoder-side choice: no header field
 or container change signals it, and decoders need no special mode. libpxl
 exposes it as `PXL_ENCODE_PROGRESSIVE` (`pxltool c … -p`).
 

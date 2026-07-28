@@ -408,7 +408,8 @@ static int stream_feed_check(const char* name, pxl_buffer enc, size_t chunk,
    with 1-byte and 7-byte chunks. */
 static int check_stream_one(const char* name, uint32_t w, uint32_t h,
                            uint8_t channels, uint8_t bpc, unsigned flags,
-                           uint8_t expect_not_filter)
+                           uint8_t expect_not_filter, int low_color,
+                           uint8_t expect_filter)
 {
     pxl_image src, dec;
     pxl_buffer enc;
@@ -424,8 +425,22 @@ static int check_stream_one(const char* name, uint32_t w, uint32_t h,
     src.width = w; src.height = h;
     src.channels = channels; src.bytes_per_channel = bpc;
     if (!src.buffer.data) { printf("[FAIL] stream/%s: alloc\n", name); return 0; }
-    for (i = 0; i < size; ++i) {
-        src.buffer.data[i] = (unsigned char)((i * 91 + (i >> 5) * 13) & 0xFF);
+    if (low_color) {
+        /* A handful of flat colors in wide runs: every differencing filter turns
+           this into noise, so the encoder picks PXL_FILTER_NONE. */
+        static const unsigned char tone[4][4] = {
+            { 0x0A, 0x14, 0x1E, 0xFF }, { 0xC8, 0x0A, 0x0A, 0x40 },
+            { 0x05, 0xF0, 0x5A, 0x80 }, { 0xFA, 0xFA, 0xFA, 0x10 }
+        };
+        size_t pxb = (size_t)channels * bpc;
+        for (i = 0; i < size; ++i) {
+            size_t p = i / pxb, c = (i % pxb) / bpc;
+            src.buffer.data[i] = tone[p & 3u][c & 3u];
+        }
+    } else {
+        for (i = 0; i < size; ++i) {
+            src.buffer.data[i] = (unsigned char)((i * 91 + (i >> 5) * 13) & 0xFF);
+        }
     }
 
     enc = pxl_encode_ex(&src, 6, flags);
@@ -437,6 +452,13 @@ static int check_stream_one(const char* name, uint32_t w, uint32_t h,
     if (expect_not_filter != 0xFF && hdr.color_filter == expect_not_filter) {
         printf("[FAIL] stream/%s: filter %u should have been excluded\n",
                name, hdr.color_filter);
+        ok = 0;
+    }
+    /* Guard the fixture itself: if the encoder stops choosing this filter the
+       case silently stops covering the path it was written for. */
+    if (expect_filter != 0xFF && hdr.color_filter != expect_filter) {
+        printf("[FAIL] stream/%s: expected filter %u, got %u\n",
+               name, expect_filter, hdr.color_filter);
         ok = 0;
     }
 
@@ -1017,21 +1039,27 @@ int main(int argc, char** argv)
 
     /* Progressive encode must never pick BCIF, and must stream row by row. */
     failures += !check_stream_one("gray8_prog",  100, 80, 1, 1,
-                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF);
+                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
     failures += !check_stream_one("rgb8_prog",   128, 96, 3, 1,
-                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF);
+                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
     failures += !check_stream_one("rgba8_prog",  128, 96, 4, 1,
-                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF);
+                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
     failures += !check_stream_one("rgb16_prog",   40, 40, 3, 2,
-                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF);
+                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
     /* Larger than one zstd block (>256 KB filtered), so rows MUST arrive before
        the last byte -- this is the actual progressive-loading guarantee. */
     failures += !check_stream_one("rgb8_big_prog", 512, 400, 3, 1,
-                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF);
+                                  PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
+    /* Flat-color content makes PXL_FILTER_NONE win, which is the only way to
+       exercise the unfiltered row path in the streaming decoder. */
+    failures += !check_stream_one("rgb8_none",   128, 96, 3, 1,
+                                  0, 0xFF, 1, PXL_FILTER_NONE);
+    failures += !check_stream_one("rgb8_big_none", 512, 400, 3, 1,
+                                  0, 0xFF, 1, PXL_FILTER_NONE);
     /* Default encode: whatever filter wins (possibly BCIF) must still stream. */
-    failures += !check_stream_one("rgb8_any",    128, 96, 3, 1, 0, 0xFF);
-    failures += !check_stream_one("rgba8_any",   128, 96, 4, 1, 0, 0xFF);
-    failures += !check_stream_one("one_px",        1,  1, 4, 1, 0, 0xFF);
+    failures += !check_stream_one("rgb8_any",    128, 96, 3, 1, 0, 0xFF, 0, 0xFF);
+    failures += !check_stream_one("rgba8_any",   128, 96, 4, 1, 0, 0xFF, 0, 0xFF);
+    failures += !check_stream_one("one_px",        1,  1, 4, 1, 0, 0xFF, 0, 0xFF);
     failures += !check_stream_errors();
     failures += !check_bad_filter_geometry();
 

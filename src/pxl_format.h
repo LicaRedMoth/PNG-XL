@@ -48,10 +48,16 @@
 /* Palette limits: PNG allows at most 256 entries, 3 bytes each. */
 #define PXL_MAX_PALETTE 256
 
-/* Color filter modes. */
+/* Color filter modes. IDs 0..31 are PXL's own; 32..255 stay reserved so a
+   later revision can add filters without moving the ones already in use. */
 #define PXL_FILTER_DELTA    0 /* generic per-channel left delta (any pixelBytes 1..8) */
 #define PXL_FILTER_BCIF     1 /* BCIF YUV transform + plane split (8-bit RGB / RGBA)   */
 #define PXL_FILTER_ADAPTIVE 2 /* PNG-style per-row None/Sub/Up/Avg/Paeth (any format)  */
+#define PXL_FILTER_NONE     3 /* no transform at all: pixels stored verbatim           */
+
+/* Highest filter ID this build understands. Decoders reject anything above it,
+   so bumping this is the single place that admits a new filter. */
+#define PXL_FILTER_MAX      PXL_FILTER_NONE
 
 /* Parsed header (in-memory representation). */
 typedef struct {

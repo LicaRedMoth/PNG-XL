@@ -10,6 +10,49 @@ typically ~65–70% of the equivalent PNG.
 `libpxl` exposes a clean C ABI so it can back editor plugins (GIMP, Krita) and
 thumbnailers (Dolphin, Windows) later.
 
+## Философия формата
+
+PXL — современный lossless-формат изображений, созданный с приоритетом
+простоты реализации, высокой скорости декодирования и воспроизводимой
+спецификации. Идея простая: взять понятную архитектуру PNG, сохранить её
+сильные стороны, убрать устаревшие решения, добавить современные возможности —
+и при этом не превратить формат в огромный исследовательский проект.
+
+Это тот же PNG, но с упором на скорость и на то, чтобы работать на слабом
+железе. Целевой минимум — Sony PSP: 32 МБ RAM, 32-битная little-endian
+система, без быстрых операций с плавающей точкой. Отсюда и ограничение по
+размеру изображений: экран PSP это 480×272, огромные картинки там не нужны
+никому и ни в каком формате.
+
+Приоритеты, по порядку:
+
+1. **Скорость декодирования.** Декод важнее энкода. Файл кодируют один раз, а
+   читают тысячи.
+2. **Вес декодера.** Не косметика, а требование целевого железа. Измеряется
+   и записывается, см. ниже.
+3. **Простота и воспроизводимость спецификации.** Формат должен быть
+   реализуем по документу, без чтения нашего исходника.
+4. **Размер файла.** Минимум на 15% лучше PNG. Мы не претендуем на победу над
+   JPEG XL или WebP и не пытаемся её изобразить.
+
+Чего мы честно **не** делаем: не гонимся за лучшим сжатием в мире, не
+добавляем возможности, которые ломают потоковый декод сверху-вниз, и не
+начинаем V2, пока V1 не выполнил свои же приоритеты.
+
+Текущее состояние приоритетов, по измерениям от 2026-07-28
+(см. [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+
+- Скорость декода — **выполнено**: в 2.1 раза быстрее libpng на сырых пикселях.
+  Но QOI быстрее нас примерно на 30%, на всех 24 файлах корпуса.
+- Вес декодера — **не выполнено**: 861 КБ против 209 КБ у libpng+zlib. Наш
+  собственный код всего 19 КБ, остальное — libzstd, включая ненужный декодеру
+  компрессор.
+- Размер файла — **выполнено**: 85.5% от PNG по корпусу фотографий.
+
+Журнал идей, включая отклонённые и причины отказа, лежит в
+[docs/RESEARCH.md](docs/RESEARCH.md). История замеров — в
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), она только на добавление.
+
 ## How it works
 
 1. **Load** the source image with libpng into tightly packed pixels.
@@ -158,23 +201,23 @@ Source files: [`tests/data/RGB_24bits_palette_color_test_chart.png`](tests/data/
 | Format | Mode | Encode (median, ms) | Decode (median, ms) | Size (bytes) | % of baseline |
 |---|---|---:|---:|---:|---:|
 | PNG | lossless (native) | - | - | 30597 | 100.0% |
-| PXL | lossless (native) | **14** | **12** | 5990 | 19.6% |
-| GIF | palette (256 colors) | 189 | 74 | 15283 | 49.9% |
-| JXL | lossless, effort 7/10 (-d 0) | 164 | 44 | 5963 | 19.5% |
-| WebP | lossless (-lossless 1) | 226 | 145 | **3064** | 10.0% |
-| AVIF | lossless, speed 6/10 (-l) | 95 | 27 | 12332 | 40.3% |
-| QOI | lossless (native) | 21 | 36 | 71808 | 234.7% |
+| PXL | lossless (native) | **16** | **16** | 5994 | 19.6% |
+| GIF | palette (256 colors) | 391 | 116 | 15283 | 49.9% |
+| JXL | lossless, effort 7/10 (-d 0) | 240 | 57 | 5963 | 19.5% |
+| WebP | lossless (-lossless 1) | 285 | 191 | **3064** | 10.0% |
+| AVIF | lossless, speed 6/10 (-l) | 160 | 21 | 12332 | 40.3% |
+| QOI | lossless (native) | 21 | 37 | 71808 | 234.7% |
 
 **Animation** (baseline: APNG)
 
 | Format | Mode | Encode (median, ms) | Decode (median, ms) | Size (bytes) | % of baseline |
 |---|---|---:|---:|---:|---:|
 | APNG | lossless (native) | - | - | 61968 | 100.0% |
-| APXL | lossless (native) | **32** | **40** | **47209** | 76.2% |
-| GIF | palette (256 colors) | 2914 | 95 | 37713 | 60.9% |
-| WebP | lossless (-lossless 1) | 384 | 71 | 53666 | 86.6% |
-| AVIF | lossless, speed 6/10 (-l) | 454 | 83 | 73331 | 118.3% |
-| JXL | lossless, effort 7/10 (-d 0) | 638 | 110 | 52509 | 84.7% |
+| APXL | lossless (native) | **31** | **36** | **47209** | 76.2% |
+| GIF | palette (256 colors) | 3759 | 98 | 37713 | 60.9% |
+| WebP | lossless (-lossless 1) | 467 | 77 | 53666 | 86.6% |
+| AVIF | lossless, speed 6/10 (-l) | 603 | 89 | 73331 | 118.3% |
+| JXL | lossless, effort 7/10 (-d 0) | 713 | 140 | 52509 | 84.7% |
 
 Bold marks the smallest value in each numeric column (GIF excluded, see
 below). Mode notes each tool's effort/speed setting where it has one — all
@@ -187,6 +230,22 @@ true-color pixels — its numbers are not directly comparable to the other
 formats in these tables, and it is excluded from the bold "winner" markers
 above for the same reason.
 
+The decode column above times `pxltool d`, which re-encodes a PNG on the way
+out, so it does not say much about the decoders themselves. Decoding compressed
+bytes straight to raw pixels over the 24 Kodak photographs, median of 15 reps
+per file (`bench/rawdec`, see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+
+| Decoder | Total ms | Total bytes | % of PNG |
+|---|---:|---:|---:|
+| QOI | 124.4 | 16501520 | 103.5% |
+| PXL | 163.7 | **13633519** | **85.5%** |
+| libpng | 347.5 | 15941880 | 100% |
+
+PXL decodes ~2.1x faster than libpng and its files are 14.5% smaller. **QOI is
+faster than PXL**, by roughly 30%, on all 24 of 24 files — but QOI barely
+compresses at all, and its files come out slightly larger than the source PNGs.
+So PXL sits between the two: near QOI on speed, ahead of both on size.
+
 PXL/APXL decode slower than they encode here, which looks backwards for a
 zstd-based format (zstd itself decodes several times faster than it
 compresses). The gap is not in the codec: `pxl_decode`/`apxl_decode` alone
@@ -196,6 +255,32 @@ out, and libpng's zlib deflate on write costs roughly 10x what its inflate on
 read costs — that PNG-write cost, not decompression, is what dominates the
 decode column for PXL and APXL.
 <!-- BENCH:END -->
+
+### Across a whole corpus
+
+The tables above are two files. These are every file in both committed
+corpora, which is the number to judge the format by:
+
+<!-- CORPUS:BEGIN -->
+Corpus-wide totals over the 24 [Kodak](tests/data/Kodak-Lossless-True-Color-Image-Suite)
+true-color photographs and the valid files of the
+[official PNG test suite](tests/data/The-official-test-suite-for-PNG)
+(deliberately-corrupt `x*.png` excluded), 186 files in total, on 2 CPU cores.
+Every row sums only the files that format encoded successfully, and compares
+against the source PNGs of that same subset. Reproduce with `bench/corpus.sh`.
+
+| Format | Mode | Files | Total bytes | % of PNG | Encode (ms/file) |
+|---|---|---:|---:|---:|---:|
+| PXL | lossless, level 12 | 186 | 13712646 | 88.4% | 140.3 |
+| JXL | lossless, effort 7/10 | 183 | 10339194 | 66.7% | 526.7 |
+| WebP | lossless (-lossless 1) | 186 | 11385268 | 73.4% | 313.6 |
+| AVIF | lossless, speed 6/10 (-l) | 186 | 13861287 | 89.4% | 309.4 |
+| PNG (oxipng -o max) | lossless recompress | 186 | 14716975 | 94.9% | 1041.2 |
+
+Encode time is total wall time divided by file count, so it includes process
+startup per file — these are whole-corpus throughput figures, not the
+carefully-median-ed per-call timings of the single-image tables above.
+<!-- CORPUS:END -->
 
 ## Progressive (top-to-bottom) decoding
 

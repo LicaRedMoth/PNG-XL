@@ -201,6 +201,7 @@ static int cmd_info(const char* in)
     printf("  color filter   : %s\n",
            h.color_filter == PXL_FILTER_BCIF     ? "BCIF (YUV + planes)" :
            h.color_filter == PXL_FILTER_ADAPTIVE ? "adaptive (PNG-style per-row)" :
+           h.color_filter == PXL_FILTER_NONE     ? "none (pixels stored verbatim)" :
                                                    "delta");
     printf("  progressive    : %s\n",
            h.color_filter == PXL_FILTER_BCIF

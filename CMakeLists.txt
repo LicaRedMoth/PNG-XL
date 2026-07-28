@@ -134,6 +134,43 @@ set_target_properties(pxl_static PROPERTIES OUTPUT_NAME pxl)
 add_executable(pxltool tools/pxltool.c)
 target_link_libraries(pxltool PRIVATE pxl_static)
 
+# Test bench for candidate predictors. Not installed: it neither reads nor
+# writes the format, it only measures the size of filter variants.
+add_executable(predlab tools/predlab.c)
+target_link_libraries(predlab PRIVATE pxl_static)
+if(PXL_VENDORED)
+    target_include_directories(predlab PRIVATE ${PXL_ZSTD_INCLUDE})
+endif()
+
+# Pure-decode benchmark (compressed bytes -> pixels): PXL against QOI and
+# libpng. Built only when a vendored qoi.h is present, since it is the baseline.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/qoi/qoi.h")
+    add_executable(pxl_bench_rawdec bench/rawdec.c)
+    target_link_libraries(pxl_bench_rawdec PRIVATE pxl_static)
+    target_include_directories(pxl_bench_rawdec PRIVATE
+                               "${CMAKE_CURRENT_SOURCE_DIR}/vendor/qoi")
+    if(PXL_VENDORED)
+        target_include_directories(pxl_bench_rawdec PRIVATE ${PXL_ZSTD_INCLUDE})
+    endif()
+endif()
+
+# Decode time split by stage: zstd against unfiltering. It includes pxl_codec.c
+# directly because the stage helpers are static, and exposing them would widen
+# the public API for a benchmark. Hence linking the dependencies directly rather
+# than pxl_static, which would duplicate the symbols.
+add_executable(pxl_bench_stages bench/stages.c
+                                src/pxl_png.c
+                                src/pxl_pngio.c
+                                src/pxl_meta.c
+                                src/pxl_io.c)
+target_include_directories(pxl_bench_stages PRIVATE src)
+target_link_libraries(pxl_bench_stages PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_stages PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 #-----------------------------------------------------------------------------
 # Tests
 #-----------------------------------------------------------------------------
