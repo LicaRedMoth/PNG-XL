@@ -10,48 +10,52 @@ typically ~65–70% of the equivalent PNG.
 `libpxl` exposes a clean C ABI so it can back editor plugins (GIMP, Krita) and
 thumbnailers (Dolphin, Windows) later.
 
-## Философия формата
+## Format philosophy
 
-PXL — современный lossless-формат изображений, созданный с приоритетом
-простоты реализации, высокой скорости декодирования и воспроизводимой
-спецификации. Идея простая: взять понятную архитектуру PNG, сохранить её
-сильные стороны, убрать устаревшие решения, добавить современные возможности —
-и при этом не превратить формат в огромный исследовательский проект.
+PXL is a modern lossless image format built around three priorities:
+implementation simplicity, fast decoding, and a specification you can
+reproduce. The idea is plain — take PNG's understandable architecture, keep its
+strengths, drop the obsolete parts, add modern capabilities, and do all that
+without turning the format into a sprawling research project.
 
-Это тот же PNG, но с упором на скорость и на то, чтобы работать на слабом
-железе. Целевой минимум — Sony PSP: 32 МБ RAM, 32-битная little-endian
-система, без быстрых операций с плавающей точкой. Отсюда и ограничение по
-размеру изображений: экран PSP это 480×272, огромные картинки там не нужны
-никому и ни в каком формате.
+It is the same PNG, but leaning on speed and on running well on weak hardware.
+The target floor is the Sony PSP: 32 MB RAM, a 32-bit little-endian system, no
+fast floating-point. That floor is also where the image size limit comes from:
+the PSP screen is 480x272, and nobody needs huge pictures there, in any format.
 
-Приоритеты, по порядку:
+Priorities, in order:
 
-1. **Скорость декодирования.** Декод важнее энкода. Файл кодируют один раз, а
-   читают тысячи.
-2. **Вес декодера.** Не косметика, а требование целевого железа. Измеряется
-   и записывается, см. ниже.
-3. **Простота и воспроизводимость спецификации.** Формат должен быть
-   реализуем по документу, без чтения нашего исходника.
-4. **Размер файла.** Минимум на 15% лучше PNG. Мы не претендуем на победу над
-   JPEG XL или WebP и не пытаемся её изобразить.
+1. **Decode speed.** Decode matters more than encode. A file is encoded once
+   and read thousands of times.
+2. **Decoder size.** Not cosmetics, but a requirement of the target hardware.
+   It is measured and recorded, see below.
+3. **A simple, reproducible specification.** The format must be implementable
+   from the document, without reading our source.
+4. **File size.** At least 15% better than PNG on true-color photographic
+   content, which is the content the format is aimed at. We do not claim to
+   beat JPEG XL or WebP, and we do not pretend otherwise.
 
-Чего мы честно **не** делаем: не гонимся за лучшим сжатием в мире, не
-добавляем возможности, которые ломают потоковый декод сверху-вниз, и не
-начинаем V2, пока V1 не выполнил свои же приоритеты.
+What we honestly do **not** do: chase the world's best compression ratio, add
+features that break top-to-bottom streaming decode, or start V2 before V1 has
+met its own priorities.
 
-Текущее состояние приоритетов, по измерениям от 2026-07-28
-(см. [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+Where those priorities currently stand, per the 2026-07-28 measurements
+(see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
-- Скорость декода — **выполнено**: в 2.1 раза быстрее libpng на сырых пикселях.
-  Но QOI быстрее нас примерно на 30%, на всех 24 файлах корпуса.
-- Вес декодера — **не выполнено**: 861 КБ против 209 КБ у libpng+zlib. Наш
-  собственный код всего 19 КБ, остальное — libzstd, включая ненужный декодеру
-  компрессор.
-- Размер файла — **выполнено**: 85.5% от PNG по корпусу фотографий.
+- Decode speed — **met**: 2.1x faster than libpng into raw pixels. But QOI is
+  still about 30% faster than us, on all 24 files of the corpus.
+- Decoder size — **not met**: 861 KB against 209 KB for libpng+zlib. Our own
+  code is only 19 KB; the rest is libzstd, including the compressor the decoder
+  never needs.
+- File size — **met on photographs, not in general**: 85.5% of PNG across the
+  Kodak photographic corpus, but 97.6% across the wider 396-file corpus. On the
+  158 8-bit grayscale USC-SIPI plates we are at 100.3%, i.e. slightly *worse*
+  than PNG: the color filter does nothing on one channel, and on high-frequency
+  aerials and textures zstd's edge over DEFLATE nearly vanishes.
 
-Журнал идей, включая отклонённые и причины отказа, лежит в
-[docs/RESEARCH.md](docs/RESEARCH.md). История замеров — в
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md), она только на добавление.
+The journal of ideas, including the rejected ones and the reasons they were
+rejected, lives in [docs/RESEARCH.md](docs/RESEARCH.md). The measurement
+history is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), append-only.
 
 ## How it works
 

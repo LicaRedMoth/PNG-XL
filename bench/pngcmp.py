@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Побитовая сверка двух PNG на равенство пикселей.
+"""Bit-exact comparison of two PNGs for pixel equality.
 
-Зачем не PIL: PIL не применяет tRNS-ключ для серых изображений и режет 16 бит
-до 8, из-за чего корректные файлы выглядят как несовпадающие. Здесь IDAT
-распаковывается вручную, а канонизация повторяет ту, что делает кодер:
-  - PLTE            -> RGB (плюс альфа из tRNS, если он есть);
-  - серый < 8 бит   -> 8 бит с масштабированием, как png_set_expand_gray_1_2_4_to_8;
-  - tRNS-ключ       -> реальный альфа-канал;
-  - 16 бит          -> остаются 16 битами.
-Код возврата 0 при равенстве, 1 при расхождении.
+Why not PIL: PIL does not apply the tRNS key for grayscale images and truncates
+16 bits to 8, which makes correct files look mismatched. Here IDAT is
+decompressed by hand, and canonicalisation mirrors what the encoder does:
+  - PLTE            -> RGB (plus alpha from tRNS, if present);
+  - gray < 8 bit    -> 8 bit with scaling, like png_set_expand_gray_1_2_4_to_8;
+  - tRNS key        -> a real alpha channel;
+  - 16 bit          -> stays 16 bit.
+Exit code 0 on equality, 1 on mismatch.
 """
 import struct
 import sys
@@ -20,7 +20,7 @@ import numpy as np
 def read_png(path):
     d = open(path, 'rb').read()
     if d[:8] != b'\x89PNG\r\n\x1a\n':
-        raise ValueError(f'{path}: не PNG')
+        raise ValueError(f'{path}: not a PNG')
     pos, idat, ihdr, plte, trns = 8, [], None, None, None
     while pos + 8 <= len(d):
         ln, = struct.unpack('>I', d[pos:pos + 4])
@@ -45,13 +45,13 @@ def read_png(path):
     return w, h, depth, ctype, nch, plte, trns, samples
 
 
-# Adam7: начальные смещения и шаги для каждого из семи проходов.
+# Adam7: start offsets and steps for each of the seven passes.
 ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
          (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
 
 
 def unfilter(u, off, w, h, depth, nch):
-    """Снять фильтры строк, вернуть (h, stride) байтов. Начинает с u[off]."""
+    """Undo row filters, return (h, stride) bytes. Starts at u[off]."""
     bpp = max(1, nch * depth // 8)
     stride = (w * nch * depth + 7) // 8
     out = np.empty((h, stride), np.uint8)
@@ -82,14 +82,14 @@ def unfilter(u, off, w, h, depth, nch):
                 pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
                 line[i] = (line[i] + pr) & 255
         elif ft:
-            raise ValueError(f'неизвестный тип фильтра строки: {ft}')
+            raise ValueError(f'unknown row filter type: {ft}')
         out[y] = np.frombuffer(bytes(line), np.uint8)
         prev = line
     return out, o
 
 
 def deinterlace(u, w, h, depth, nch):
-    """Собрать семь проходов Adam7 в единый массив (h, w, nch)."""
+    """Merge the seven Adam7 passes into a single (h, w, nch) array."""
     full = np.zeros((h, w, nch), np.uint16)
     o = 0
     for x0, y0, dx, dy in ADAM7:
@@ -103,7 +103,7 @@ def deinterlace(u, w, h, depth, nch):
 
 
 def unpack_samples(rows, w, depth, nch):
-    """Строки байтов -> массив (h, w, nch) с сэмплами в native-порядке."""
+    """Byte rows -> (h, w, nch) array with samples in native order."""
     if isinstance(rows, tuple):
         rows = rows[0]
     h = rows.shape[0]
@@ -125,9 +125,9 @@ def canonical(path):
     w, h, depth, ctype, nch, plte, trns, s = read_png(path)
     maxv = (1 << depth) - 1
 
-    if ctype == 3:  # палитра -> RGB(A)
+    if ctype == 3:  # palette -> RGB(A)
         if not plte:
-            raise ValueError(f'{path}: PLTE отсутствует')
+            raise ValueError(f'{path}: PLTE missing')
 
         pal = np.frombuffer(plte, np.uint8).reshape(-1, 3).astype(np.uint16)
         idx = s[:, :, 0]
@@ -139,7 +139,7 @@ def canonical(path):
             px = np.concatenate([px, al[idx][:, :, None]], axis=2)
         return 8, px
 
-    if depth < 8:  # серый < 8 бит -> 8 бит, как это делает libpng
+    if depth < 8:  # gray < 8 bit -> 8 bit, the way libpng does it
         key = trns and struct.unpack('>H', trns)[0]
         scale = 255 // maxv
         out = s * scale
@@ -148,7 +148,7 @@ def canonical(path):
             out = np.concatenate([out, al[:, :, None]], axis=2)
         return 8, out
 
-    if trns is not None and ctype in (0, 2):  # tRNS-ключ -> альфа-канал
+    if trns is not None and ctype in (0, 2):  # tRNS key -> alpha channel
         if ctype == 0:
             key = struct.unpack('>H', trns)[0]
             hit = s[:, :, 0] == key
@@ -167,16 +167,16 @@ def main():
     try:
         da, a = canonical(sys.argv[1])
         db, b = canonical(sys.argv[2])
-    except Exception as exc:  # разбор не удался — считаем сверку провалившейся
+    except Exception as exc:  # parse failed - treat the comparison as failed
         print(f'pngcmp: {exc}', file=sys.stderr)
         return 1
     if da != db or a.shape != b.shape:
-        print(f'pngcmp: форма/глубина разошлись {da}{a.shape} vs {db}{b.shape}',
+        print(f'pngcmp: shape/depth mismatch {da}{a.shape} vs {db}{b.shape}',
               file=sys.stderr)
         return 1
     if not np.array_equal(a, b):
         diff = np.abs(a.astype(int) - b.astype(int))
-        print(f'pngcmp: пиксели разошлись, max по каналам '
+        print(f'pngcmp: pixels differ, per-channel max '
               f'{diff.reshape(-1, a.shape[2]).max(0).tolist()}', file=sys.stderr)
         return 1
     return 0

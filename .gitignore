@@ -31,6 +31,9 @@ pxl_interop_tmp.png
 /tests/data/The-official-test-suite-for-PNG/
 /tests/data/USC-SIPI-Image-Database/
 /tests/data/Video_24fps.mp4
+/tests/data/bad-apple.mp4
 /tests/data/Video_24fps_96f.apng
 /tests/data/Photorealistic_cover.png
 /tests/data/Photorealistic_cover_fs8.png
+# Symlink to a local screenshot folder. Personal content: never commit it.
+/tests/data/Screenshots

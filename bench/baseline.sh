@@ -1,6 +1,6 @@
 #!/bin/bash
-# Базовая линия PXL: размер и время по датасету. Вывод — TSV.
-# Использование: bench/baseline.sh [-l LEVEL] > bench/baseline_<дата>.tsv
+# PXL baseline: size and timings across the dataset. Output is TSV.
+# Usage: bench/baseline.sh [-l LEVEL] > bench/baseline_<date>.tsv
 export LC_ALL=C
 T=${PXLTOOL:-build/pxltool}
 LEVEL=12
@@ -27,9 +27,9 @@ run_one(){
   local dec=$(( ($(date +%s%N)-s)/1000000 ))
   local png=$(stat -c%s "$f") pxl=$(stat -c%s $o)
   local flt=$($T info $o 2>/dev/null | sed -n 's/.*color filter *: *//p' | cut -d' ' -f1)
-  # побитовая сверка пикселей оригинал vs раскодированный.
-  # Через bench/pngcmp.py, а не PIL: PIL игнорирует tRNS у серых картинок
-  # и режет 16 бит до 8, из-за чего корректные файлы выглядят битыми.
+  # bit-exact pixel comparison, original vs decoded.
+  # Via bench/pngcmp.py rather than PIL: PIL ignores tRNS on grayscale images
+  # and truncates 16 bits to 8, which makes correct files look broken.
   local st=OK
   python3 -W ignore "$(dirname "$0")/pngcmp.py" "$f" "$r" >/dev/null 2>&1 || st=MISMATCH
   read w h d c <<<"$(python3 -c "

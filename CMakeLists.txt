@@ -46,6 +46,10 @@ if(PXL_VENDORED)
     set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
     set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
     set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
+    # PXL never reads pre-1.x zstd frames: it only decodes frames written by
+    # its own encoder. Legacy support is ~150 KB of dead weight in a decoder.
+    set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+    set(ZSTD_MULTITHREAD    OFF CACHE BOOL "" FORCE)
     add_subdirectory("${PXL_ZSTD_DIR}/build/cmake" zstd_build)
     set(PXL_ZSTD_TARGET libzstd_static)
     set(PXL_ZSTD_INCLUDE "${PXL_ZSTD_DIR}/lib")
@@ -82,8 +86,13 @@ endif()
 # libpxlcore (static + shared): PNG-free codec, depends only on zstd.
 # This is the library an ffmpeg codec or other front end reuses.
 #-----------------------------------------------------------------------------
+# The codec is three translation units, not one, so that a decode-only program
+# links neither pxl_encode nor the zstd compressor behind it (~317 KB of .text).
+# A linker discards unused object files, never half of one.
 set(PXLCORE_SOURCES
-    src/pxl_codec.c
+    src/pxl_codec_common.c
+    src/pxl_codec_encode.c
+    src/pxl_codec_decode.c
     src/pxl_io.c
     src/apxl_codec.c)
 
@@ -154,11 +163,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/qoi/qoi.h")
     endif()
 endif()
 
-# Decode time split by stage: zstd against unfiltering. It includes pxl_codec.c
-# directly because the stage helpers are static, and exposing them would widen
-# the public API for a benchmark. Hence linking the dependencies directly rather
-# than pxl_static, which would duplicate the symbols.
+# Decode time split by stage: zstd against unfiltering. It includes the codec's
+# encode/decode units directly because the stage helpers are static, and exposing
+# them would widen the public API for a benchmark. Hence linking the dependencies
+# directly rather than pxl_static, which would duplicate the symbols.
 add_executable(pxl_bench_stages bench/stages.c
+                                src/pxl_codec_common.c
                                 src/pxl_png.c
                                 src/pxl_pngio.c
                                 src/pxl_meta.c
@@ -169,6 +179,38 @@ target_link_libraries(pxl_bench_stages PRIVATE
 if(PXL_VENDORED)
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_ZSTD_INCLUDE})
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
+# Which per-row filters the adaptive filter actually picks, over a corpus.
+# Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
+# the row-filter helpers are static.
+add_executable(pxl_bench_rowstats bench/rowstats.c
+                                  src/pxl_codec_common.c
+                                  src/pxl_png.c
+                                  src/pxl_pngio.c
+                                  src/pxl_meta.c
+                                  src/pxl_io.c)
+target_include_directories(pxl_bench_rowstats PRIVATE src)
+target_link_libraries(pxl_bench_rowstats PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_rowstats PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_rowstats PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
+# What the per-row filter choice is worth in bytes, versus forcing one filter.
+add_executable(pxl_bench_rowfix bench/rowfix.c
+                                src/pxl_codec_common.c
+                                src/pxl_png.c
+                                src/pxl_pngio.c
+                                src/pxl_meta.c
+                                src/pxl_io.c)
+target_include_directories(pxl_bench_rowfix PRIVATE src)
+target_link_libraries(pxl_bench_rowfix PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_rowfix PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_rowfix PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
 #-----------------------------------------------------------------------------

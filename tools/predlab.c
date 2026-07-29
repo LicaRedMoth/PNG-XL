@@ -1,12 +1,12 @@
 /** \file predlab.c
-    \brief Испытательный стенд для кандидатов предсказателей (вне формата).
+    \brief Test bench for predictor candidates (outside the format).
 
-    Грузит PNG штатным загрузчиком, применяет варианты преобразований к
-    пиксельному буферу и сжимает результат zstd. Печатает только размеры,
-    чтобы сравнивать кандидатов между собой и с текущей базовой линией.
-    Формат .pxl этот инструмент не читает и не пишет.
+    Loads a PNG with the regular loader, applies transform variants to the
+    pixel buffer and compresses the result with zstd. Prints sizes only, so
+    candidates can be compared with each other and the current baseline.
+    This tool neither reads nor writes the .pxl format.
 
-    Использование: predlab [-l LEVEL] FILE.png [FILE.png ...]
+    Usage: predlab [-l LEVEL] FILE.png [FILE.png ...]
 */
 #include "pxl.h"
 #include "pxl_png.h"
@@ -18,8 +18,8 @@
 #include <zstd.h>
 
 /*----------------------------------------------------------------------------
-  Предсказатели: значение предсказывается по уже восстановленным соседям
-  a = слева, b = сверху, c = сверху-слева.
+  Predictors: the value is predicted from already reconstructed neighbours
+  a = left, b = above, c = above-left.
 ----------------------------------------------------------------------------*/
 
 static uint8_t paeth(uint8_t a, uint8_t b, uint8_t c)
@@ -33,7 +33,7 @@ static uint8_t paeth(uint8_t a, uint8_t b, uint8_t c)
     return c;
 }
 
-/* MED / LOCO-I: предсказатель из JPEG-LS. */
+/* MED / LOCO-I: the predictor from JPEG-LS. */
 static uint8_t med(uint8_t a, uint8_t b, uint8_t c)
 {
     int mx, mn;
@@ -43,8 +43,8 @@ static uint8_t med(uint8_t a, uint8_t b, uint8_t c)
     return (uint8_t)((int)a + (int)b - (int)c);
 }
 
-/* Градиент с половинным весом диагонали: (a + b) / 2 ходит хуже на резких
-   краях, эта форма ближе к GAP из CALIC. */
+/* Gradient with half weight on the diagonal: (a + b) / 2 does worse on sharp
+   edges, this form is closer to GAP from CALIC. */
 static uint8_t grad(uint8_t a, uint8_t b, uint8_t c)
 {
     int p = (int)a + (((int)b - (int)c) >> 1);
@@ -90,11 +90,11 @@ static uint8_t predict(pred_kind k, uint8_t a, uint8_t b, uint8_t c)
 }
 
 /*----------------------------------------------------------------------------
-  Преобразования буфера. Все работают по байтам с шагом pixel_bytes, так что
-  подходят и для 8-битных, и (побайтово) для 16-битных данных.
+  Buffer transforms. All operate on bytes with a pixel_bytes step, so they fit
+  both 8-bit and (byte-wise) 16-bit data.
 ----------------------------------------------------------------------------*/
 
-/* Чередующийся вывод: остаток на месте пикселя, предсказание по каналам. */
+/* Interleaved output: residual in place of the pixel, prediction per channel. */
 static void filter_interleaved(const uint8_t* in, uint8_t* out,
                                uint32_t w, uint32_t h, unsigned pb,
                                pred_kind k)
@@ -118,8 +118,8 @@ static void filter_interleaved(const uint8_t* in, uint8_t* out,
     }
 }
 
-/* Планарный вывод: сначала все остатки канала 0, потом канала 1 и т.д.
-   Предсказание идёт по исходным значениям того же канала. */
+/* Planar output: all residuals of channel 0 first, then channel 1, etc.
+   Prediction uses the source values of the same channel. */
 static void filter_planar(const uint8_t* in, uint8_t* out,
                           uint32_t w, uint32_t h, unsigned pb,
                           pred_kind k)
@@ -144,10 +144,10 @@ static void filter_planar(const uint8_t* in, uint8_t* out,
     }
 }
 
-/* Обратимое цветовое преобразование, как в текущем BCIF: Y=b, U=g-b, V=g-r.
-   Применяется к исходным пикселям, затем предсказание идёт уже по
-   декоррелированным каналам, планарно. Это и есть главный кандидат:
-   текущий BCIF делает наоборот (сначала left-delta, потом цвет). */
+/* Reversible colour transform, as in the current BCIF: Y=b, U=g-b, V=g-r.
+   Applied to the source pixels, then prediction runs on the already
+   decorrelated channels, planar. This is the main candidate: the current
+   BCIF does the opposite (left-delta first, then colour). */
 static void filter_ycocg_planar(const uint8_t* in, uint8_t* out,
                                 uint32_t w, uint32_t h, unsigned pb,
                                 pred_kind k, int full_ycocg)
@@ -159,14 +159,14 @@ static void filter_ycocg_planar(const uint8_t* in, uint8_t* out,
     uint32_t y, x;
     if (!tmp) return;
 
-    /* Шаг 1: цветовое преобразование в плоскости. */
+    /* Step 1: colour transform into planes. */
     for (y = 0; y < h; ++y) {
         const uint8_t* row = in + (size_t)y * stride;
         for (x = 0; x < w; ++x) {
             const uint8_t* p = row + (size_t)x * pb;
             uint8_t c0, c1, c2;
             if (full_ycocg) {
-                /* YCoCg-R, полностью обратимое, Y в 8 битах. */
+                /* YCoCg-R, fully reversible, Y in 8 bits. */
                 uint8_t co = (uint8_t)(p[0] - p[2]);
                 uint8_t t  = (uint8_t)(p[2] + (co >> 1));
                 uint8_t cg = (uint8_t)(p[1] - t);
@@ -187,7 +187,7 @@ static void filter_ycocg_planar(const uint8_t* in, uint8_t* out,
         }
     }
 
-    /* Шаг 2: предсказание внутри каждой плоскости. */
+    /* Step 2: prediction inside each plane. */
     for (i = 0; i < pb; ++i) {
         const uint8_t* ip = tmp + plane * i;
         uint8_t*       op = out + plane * i;
@@ -204,8 +204,8 @@ static void filter_ycocg_planar(const uint8_t* in, uint8_t* out,
     free(tmp);
 }
 
-/* Текущий BCIF: left-delta по чередующимся каналам, затем цвет, затем планы.
-   Воспроизведён здесь, чтобы стенд мерил его в тех же условиях. */
+/* Current BCIF: left-delta over interleaved channels, then colour, then planes.
+   Reproduced here so the lab measures it under the same conditions. */
 static void filter_bcif_current(const uint8_t* in, uint8_t* out,
                                 uint32_t w, uint32_t h, unsigned pb)
 {
@@ -232,7 +232,7 @@ static void filter_bcif_current(const uint8_t* in, uint8_t* out,
 }
 
 /*----------------------------------------------------------------------------
-  Замер
+  Measurement
 ----------------------------------------------------------------------------*/
 
 static size_t squeeze(const uint8_t* data, size_t size, int level)
@@ -272,7 +272,7 @@ static void record(const char* name, size_t bytes)
     }
 }
 
-/* Размер файла на диске, чтобы сравнивать с исходным PNG. */
+/* File size on disk, to compare against the source PNG. */
 static size_t file_size(const char* path)
 {
     FILE* f = fopen(path, "rb");
@@ -296,7 +296,7 @@ int main(int argc, char** argv)
         argi += 2;
     }
     if (argi >= argc) {
-        fprintf(stderr, "использование: predlab [-l LEVEL] FILE.png ...\n");
+        fprintf(stderr, "usage: predlab [-l LEVEL] FILE.png ...\n");
         return 2;
     }
 
@@ -311,12 +311,12 @@ int main(int argc, char** argv)
         pred_kind k;
 
         if (!img.buffer.data) {
-            fprintf(stderr, "пропуск (не загрузился): %s\n", path);
+            fprintf(stderr, "skip (failed to load): %s\n", path);
             continue;
         }
-        /* Стенд работает по байтам; сюда пускаем только полнобайтовые данные. */
+        /* The lab works on bytes; only whole-byte data is allowed through. */
         if (img.bit_depth && img.bit_depth < 8) {
-            fprintf(stderr, "пропуск (глубина %u): %s\n", img.bit_depth, path);
+            fprintf(stderr, "skip (depth %u): %s\n", img.bit_depth, path);
             pxl_image_free(&img);
             continue;
         }
@@ -324,7 +324,7 @@ int main(int argc, char** argv)
         pb  = (unsigned)img.channels * img.bytes_per_channel;
         raw = (size_t)img.width * img.height * pb;
         if (!raw || pb > 8 || raw != img.buffer.size) {
-            fprintf(stderr, "пропуск (геометрия): %s\n", path);
+            fprintf(stderr, "skip (geometry): %s\n", path);
             pxl_image_free(&img);
             continue;
         }
@@ -337,13 +337,13 @@ int main(int argc, char** argv)
         ++files;
         png_total += png_size;
 
-        /* Опорная точка: без фильтра. */
+        /* Baseline: no filter. */
         fsize = squeeze(img.buffer.data, raw, level);
         printf("%s\t%u\t%u\t%u\traw\t%zu\n", path, img.width, img.height,
                img.channels, fsize);
         record("raw", fsize);
 
-        /* Текущий BCIF (только для 3/4 каналов, 8 бит). */
+        /* Current BCIF (only for 3/4 channels, 8 bit). */
         if (img.bytes_per_channel == 1 && img.channels >= 3) {
             filter_bcif_current(img.buffer.data, buf, img.width, img.height, pb);
             fsize = squeeze(buf, raw, level);
@@ -392,9 +392,9 @@ int main(int argc, char** argv)
         pxl_image_free(&img);
     }
 
-    fprintf(stderr, "\n=== итог по %d файлам (уровень %d) ===\n", files, level);
+    fprintf(stderr, "\n=== total over %d files (level %d) ===\n", files, level);
     fprintf(stderr, "%-16s %14s %8s\n", "variant", "bytes", "vs png");
-    fprintf(stderr, "%-16s %14zu %7.2f%%\n", "png(исходный)", png_total, 100.0);
+    fprintf(stderr, "%-16s %14zu %7.2f%%\n", "png(source)", png_total, 100.0);
     {
         int i;
         for (i = 0; i < n_slots; ++i) {

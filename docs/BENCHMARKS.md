@@ -1,38 +1,38 @@
-# История бенчмарков
+# Benchmark history
 
-Журнал **только на добавление**. Старые записи не правим и не удаляем, даже
-если числа устарели или оказались неправильными — вместо этого пишем новую
-запись ниже и объясняем, что изменилось. Смысл журнала в том, чтобы видеть
-динамику, а не хранить одно «актуальное» число.
+An **append-only** log. Old entries are never edited or deleted, even if the
+numbers are out of date or turned out to be wrong — instead we add a new entry
+below and explain what changed. The point of the log is to show the trend, not
+to keep one "current" number.
 
-Формат записи: дата, коммит, железо, что мерили, чем мерили, результат.
-Если замер невоспроизводим (нет инструмента, другое железо) — так и пишем.
+Entry format: date, commit, hardware, what was measured, with what, result.
+If a measurement is not reproducible (no tool, different hardware) — say so.
 
 ---
 
-## 2026-07-28 — базовые замеры перед фиксацией философии
+## 2026-07-28 — baseline measurements before fixing the philosophy
 
-- **Коммит:** `f5836cc` (+ незакоммиченные изменения в рабочем дереве)
-- **Железо:** Intel Pentium B960 @ 2.20GHz, 2 ядра, 15.2 GiB RAM
-- **Компилятор:** gcc 16.1.1, сборка Release
-- **Корпус:** 24 фотографии Kodak + валидные файлы официального тестового
-  набора PNG (`x*.png` исключены)
+- **Commit:** `f5836cc` (+ uncommitted changes in the working tree)
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15.2 GiB RAM
+- **Compiler:** gcc 16.1.1, Release build
+- **Corpus:** 24 Kodak photographs + valid files from the official PNG test
+  suite (`x*.png` excluded)
 
-Три замера, которые были нужны, чтобы в философии оказались факты, а не вера.
+Three measurements needed so the philosophy would rest on facts, not belief.
 
-### Замер 1 — какие фильтры реально выбираются
+### Measurement 1 — which filters actually get picked
 
-`build/predlab -l 12` по корпусу. Инструмент прогоняет все комбинации
-цветового преобразования и построчного предсказателя и печатает размер каждой.
-Из 186 файлов корпуса `predlab` загрузил 136 (50 пропусков — файлы, которые его
-упрощённый загрузчик не читает; полный корпус обрабатывает `bench/corpus.sh`).
+`build/predlab -l 12` over the corpus. The tool runs every combination of
+color transform and per-row predictor and prints the size of each. Out of the
+186 corpus files `predlab` loaded 136 (50 skipped — files its simplified
+loader cannot read; the full corpus is handled by `bench/corpus.sh`).
 
-Суммарные размеры по всем 136 файлам, база — исходные PNG (15 498 076 байт):
+Total sizes over all 136 files, baseline is the original PNGs (15 498 076 bytes):
 
-| вариант | байт | % от PNG |
+| variant | bytes | % of PNG |
 |---|---:|---:|
-| raw (без фильтра) | 17 877 176 | 115.35% |
-| bcif-current (то, что сейчас в формате) | 13 662 066 | 88.15% |
+| raw (no filter) | 17 877 176 | 115.35% |
+| bcif-current (what the format uses today) | 13 662 066 | 88.15% |
 | **sub-med** | **13 106 230** | **84.57%** |
 | sub-paeth | 13 207 156 | 85.22% |
 | ycocg-med | 13 575 791 | 87.60% |
@@ -41,10 +41,10 @@
 | il-med | 15 288 895 | 98.65% |
 | pl-left | 17 603 189 | 113.58% |
 
-Распределение победителей **по файлам** (136 файлов, вариант с минимальным
-размером для каждого файла, `raw` и `bcif-current` исключены):
+Winner distribution **by file** (136 files, the smallest-size variant for each
+file, `raw` and `bcif-current` excluded):
 
-| победитель | файлов |
+| winner | files |
 |---|---:|
 | il-paeth | 30 |
 | pl-paeth | 25 |
@@ -59,96 +59,98 @@
 | pl-med | 2 |
 | ycocg-med | 1 |
 
-Только фотографии (24 файла Kodak): `sub-med` 18, `sub-left` 4, `ycocg-med` 1,
+Photographs only (24 Kodak files): `sub-med` 18, `sub-left` 4, `ycocg-med` 1,
 `il-left` 1.
 
-**Что из этого следует.** На фотографиях выбор почти вырожденный — `sub-med`
-берёт 18 из 24. Разброс победителей по всему корпусу объясняется крошечными
-файлами тестового набора PNG (32×32 и меньше), где разница в единицах байт и
-решает накладной расход, а не качество предсказания. То есть много вариантов
-фильтра нужны не для сжатия, а для того, чтобы не проиграть на вырожденных
-входах. `sub-med` по всему корпусу даёт 84.57% против 88.15% у текущего BCIF —
-запас около 3.6 процентных пункта на смене предсказателя, без изменения
-структуры формата.
+**What follows from this.** On photographs the choice is nearly degenerate —
+`sub-med` takes 18 of 24. The spread of winners across the whole corpus comes
+from the tiny PNG test suite files (32×32 and smaller), where the difference is
+single bytes and overhead decides the outcome, not prediction quality. So the
+many filter variants exist not for compression, but to avoid losing on
+degenerate inputs. `sub-med` over the whole corpus gives 84.57% vs 88.15% for
+the current BCIF — about 3.6 percentage points of headroom from swapping the
+predictor, with no change to the format structure.
 
-### Замер 2 — вес декодера против libpng + zlib
+### Measurement 2 — decoder size vs libpng + zlib
 
-Метод: собрать минимальные декодирующие программы (файл в память → пиксели,
-больше ничего) статически, снять символы (`strip`), сравнить размер секции
-`.text`. Так линковщик втягивает ровно то, что декодер действительно
-использует. Пустая программа для калибровки — 281 байт `.text`.
+Method: build minimal decoding programs (file into memory → pixels, nothing
+else) statically, strip symbols (`strip`), compare the size of the `.text`
+section. That way the linker pulls in exactly what the decoder actually uses.
+An empty program for calibration is 281 bytes of `.text`.
 
-| бинарник | `.text`, байт |
+| binary | `.text`, bytes |
 |---|---:|
-| пустая программа (база) | 281 |
-| декодер PXL (pxlcore + libzstd.a) | 861 170 |
-| декодер libpng (libpng.a + системная libz.so) | 209 337 |
-| только `ZSTD_decompress` | 284 978 |
-| только `ZSTD_compress` | 570 165 |
+| empty program (baseline) | 281 |
+| PXL decoder (pxlcore + libzstd.a) | 861 170 |
+| libpng decoder (libpng.a + system libz.so) | 209 337 |
+| `ZSTD_decompress` only | 284 978 |
+| `ZSTD_compress` only | 570 165 |
 
-Для справки, отдельные объектные файлы и библиотеки:
-`pxl_codec.c.o` — 18 808 байт `.text`, `pxl_io.c.o` — 413, `libpng.a` —
+For reference, individual object files and libraries:
+`pxl_codec.c.o` — 18 808 bytes of `.text`, `pxl_io.c.o` — 413, `libpng.a` —
 214 104, `libzstd.a` — 1 033 315, `libz.so` — 61 528.
 
-**Что из этого следует, и это плохая новость.** Наш собственный код
-декодирования — 19 КБ, это меньше libpng на порядок. Но собранный декодер
-получается **в 4 раза тяжелее libpng**: 861 КБ против 209 КБ. Причина в том,
-что в бинарник попадает вся libzstd, включая компрессор (сам компрессор —
-570 КБ). Даже чистый декодер zstd — 285 КБ, то есть уже больше, чем весь
-libpng вместе с zlib.
+**What follows from this, and it is bad news.** Our own decoding code is 19 KB,
+an order of magnitude smaller than libpng. But the assembled decoder ends up
+**4x heavier than libpng**: 861 KB vs 209 KB. The reason is that all of libzstd
+lands in the binary, including the compressor (the compressor alone is 570 KB).
+Even the pure zstd decoder is 285 KB, already more than all of libpng together
+with zlib.
 
-Приоритет «вес декодера» пока **не выполнен**, и это надо честно записать.
-Полезные величины на будущее: 285 КБ — это пол для любого варианта на zstd
-(если убрать втягивание компрессора), 209 КБ — цель, 19 КБ — наш собственный
-вклад.
+The "decoder size" priority is **not met** so far, and that has to be recorded
+honestly. Useful figures for later: 285 KB is the floor for any zstd-based
+variant (if the compressor pull-in is removed), 209 KB is the target, 19 KB is
+our own contribution.
 
-### Замер 3 — честный декод в сырые пиксели против QOI
+### Measurement 3 — honest decode into raw pixels vs QOI
 
-`build/pxl_bench_rawdec <файл> 15` по всем 24 фотографиям Kodak. Мерится
-именно то, что важно для просмотрщика или игры: файл уже в памяти,
-декодируем в буфер пикселей. Никакого обратного кодирования в PNG, в отличие
-от колонки decode в `bench/bench.sh`.
+`build/pxl_bench_rawdec <file> 15` over all 24 Kodak photographs. This measures
+exactly what matters for a viewer or a game: the file is already in memory, we
+decode into a pixel buffer. No re-encoding back into PNG, unlike the decode
+column in `bench/bench.sh`.
 
-Сумма по 24 файлам (медиана из 15 повторов на файл):
+Sum over 24 files (median of 15 repeats per file):
 
-| декодер | суммарно мс | суммарно байт | % от PNG |
+| decoder | total ms | total bytes | % of PNG |
 |---|---:|---:|---:|
 | QOI | 124.4 | 16 501 520 | 103.5% |
 | **PXL** | 163.7 | **13 633 519** | **85.5%** |
 | libpng | 347.5 | 15 941 880 | 100% |
 
-Пофайлово: QOI быстрее PXL на **24 из 24** файлов.
+Per file: QOI is faster than PXL on **24 of 24** files.
 
-**Что из этого следует (см. также запись от 2026-07-26 ниже: часть этого
-времени оказалась не неизбежной).** PXL декодирует примерно в 2.1 раза быстрее libpng и
-при этом файлы на 14.5% меньше — это настоящее достижение и главный аргумент
-формата. Но заявление «обгоняем QOI по скорости» **неверно**: QOI быстрее нас
-на каждом файле корпуса, примерно на 30%. Зато QOI не сжимает — его файлы
-даже чуть больше исходных PNG (103.5%), а наши на 14.5% меньше. Правильная
-формулировка: PXL размещается между QOI и libpng, ближе к QOI по скорости и
-лучше обоих по размеру.
+**What follows from this (see also the 2026-07-26 entry below: part of this
+time turned out not to be unavoidable).** PXL decodes roughly 2.1x faster than
+libpng and its files are 14.5% smaller — that is a real achievement and the
+format's main argument. But the claim "we beat QOI on speed" is **wrong**: QOI
+is faster than us on every file in the corpus, by roughly 30%. On the other
+hand QOI does not compress — its files are even slightly larger than the
+original PNGs (103.5%), while ours are 14.5% smaller. The correct phrasing:
+PXL sits between QOI and libpng, closer to QOI on speed and better than both
+on size.
 
 ---
 
-## 2026-07-26 — разбивка декода по стадиям: ZSTD против расфильтровки
+## 2026-07-26 — decode broken down by stage: ZSTD vs unfiltering
 
-Дата предыдущей записи (`2026-07-28`) записана с опечаткой, фактически замеры
-шли в тот же период. Не правлю её по правилу append-only, отмечаю здесь.
+The date on the previous entry (`2026-07-28`) has a typo; the measurements
+actually ran in the same period. Not fixing it, per append-only; noted here.
 
-- **Коммит:** `f5836cc` (+ незакоммиченные изменения в рабочем дереве)
-- **Железо:** Intel Pentium B960 @ 2.20GHz, 2 ядра, 15.2 GiB RAM
-- **Компилятор:** gcc 16.1.1, сборка Release
-- **Инструмент:** `bench/stages.c` → `build/pxl_bench_stages <файл> [reps] [level]`
-- **Метод:** файл уже в памяти. Отдельно мерится время `ZSTD_decompress` и
-  отдельно время расфильтровки в сырые пиксели, по каждому доступному
-  цветовому фильтру. Медиана из 9 повторов.
+- **Commit:** `f5836cc` (+ uncommitted changes in the working tree)
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15.2 GiB RAM
+- **Compiler:** gcc 16.1.1, Release build
+- **Tool:** `bench/stages.c` → `build/pxl_bench_stages <file> [reps] [level]`
+- **Method:** the file is already in memory. `ZSTD_decompress` time and
+  unfiltering-into-raw-pixels time are measured separately, for every
+  available color filter. Median of 9 repeats.
 
-Вопрос был прямой: что дороже при декоде — распаковка ZSTD или наша
-расфильтровка. Ответ оказался «зависит от фильтра», и это важнее самого вопроса.
+The question was blunt: what costs more during decode — ZSTD decompression or
+our unfiltering. The answer is "depends on the filter", and that matters more
+than the question itself.
 
-### Уровень 12
+### Level 12
 
-| изображение | фильтр | zstd мс | расфильтр мс | итого мс | доля расфильтр. | байт |
+| image | filter | zstd ms | unfilter ms | total ms | unfilter share | bytes |
 |---|---|---:|---:|---:|---:|---:|
 | Photorealistic 3000×3000 RGB | adaptive | 222.213 | 405.655 | 627.868 | 64.6% | 11 550 315 |
 | | bcif | 223.706 | 20.886 | 244.591 | 8.5% | 11 458 339 |
@@ -162,9 +164,9 @@ libpng вместе с zlib.
 | | delta | 0.069 | 0.109 | 0.178 | 61.2% | 3 440 |
 | | none | 0.165 | 0.016 | 0.180 | 8.7% | 27 196 |
 
-### Уровень 1 (для сравнения)
+### Level 1 (for comparison)
 
-| изображение | фильтр | zstd мс | расфильтр мс | итого мс | доля расфильтр. | байт |
+| image | filter | zstd ms | unfilter ms | total ms | unfilter share | bytes |
 |---|---|---:|---:|---:|---:|---:|
 | Photorealistic 3000×3000 RGB | adaptive | 86.723 | 389.339 | 476.061 | 81.8% | 12 013 840 |
 | | bcif | 83.117 | 27.189 | 110.306 | 24.6% | 11 272 231 |
@@ -176,46 +178,46 @@ libpng вместе с zlib.
 | | bcif | 0.105 | 0.111 | 0.216 | 51.5% | 5 954 |
 | | delta | 0.174 | 0.106 | 0.281 | 37.9% | 6 711 |
 
-**Что из этого следует.**
+**What follows from this.**
 
-1. **Для adaptive узкое место — наш код, а не ZSTD.** Расфильтровка занимает
-   65–87% декода и дороже распаковки в 1.8–6.5 раза. Менять компрессор
-   бессмысленно, пока это так.
-2. **Для delta / bcif / none всё наоборот:** доминирует ZSTD, расфильтровка это
-   2–12%. Здесь мы близки к полу, который задаёт zstd.
-3. **Разрыв adaptive против delta по времени расфильтровки — примерно 20×**
-   (405.7 против 19.9 мс) при работе того же порядка. Это не свойство формата, а
-   свойство реализации: выбор фильтра строки, судя по цифрам, крутится внутри
-   пиксельного цикла. Специализация циклов по фильтру строки не меняет ни
-   спецификацию, ни файлы, ни совместимость.
-4. **BCIF на фотоконтенте не проигрывает, а выигрывает.** 11 458 339 байт против
-   12 198 006 у delta (на 6% меньше) и даже меньше, чем у adaptive
-   (11 550 315), при расфильтровке 20.9 мс вместо 405.7. Ранее сложившееся
-   мнение «BCIF проигрывает везде» этими цифрами не подтверждается. Проигрывает
-   он только на палитровой картинке (4 414 против 3 440 у delta) и недоступен
-   для grayscale. Решение об удалении BCIF на основании этих данных
-   приостановлено.
-5. Замер 3 предыдущей записи (163.7 мс суммарно против 124.4 у QOI) стоит
-   перечитать в этом свете: часть отставания от QOI — расфильтровка adaptive,
-   то есть потенциально устранимая, а не заложенная в формат.
+1. **For adaptive the bottleneck is our code, not ZSTD.** Unfiltering takes
+   65–87% of the decode and is 1.8–6.5x more expensive than decompression.
+   Swapping the compressor is pointless while that holds.
+2. **For delta / bcif / none it is the opposite:** ZSTD dominates, unfiltering is
+   2–12%. Here we are close to the floor that zstd sets.
+3. **The adaptive vs delta gap in unfiltering time is roughly 20x**
+   (405.7 vs 19.9 ms) for the same order of work. Not a property of the format
+   but of the implementation: by the numbers, row filter selection is spinning
+   inside the pixel loop. Specializing the loops by row filter changes neither
+   the spec, nor the files, nor compatibility.
+4. **On photo content BCIF does not lose, it wins.** 11 458 339 bytes vs
+   12 198 006 for delta (6% smaller) and even smaller than adaptive
+   (11 550 315), with unfiltering at 20.9 ms instead of 405.7. The previously
+   held opinion that "BCIF loses everywhere" is not supported by these numbers.
+   It only loses on the palette image (4 414 vs 3 440 for delta) and is
+   unavailable for grayscale. The decision to remove BCIF is put on hold on the
+   basis of this data.
+5. Measurement 3 of the previous entry (163.7 ms total vs 124.4 for QOI) is
+   worth rereading in this light: part of the gap behind QOI is adaptive
+   unfiltering, i.e. potentially removable rather than inherent to the format.
 
 ---
 
-## 2026-07-26 — специализация циклов расфильтровки по типу фильтра
+## 2026-07-26 — specializing the unfiltering loops by filter type
 
-- **Коммит:** `f5836cc` + изменение `rowfilter_decode` в `src/pxl_codec.c`
-- **Железо:** Intel Pentium B960 @ 2.20GHz, 2 ядра, 15.2 GiB RAM
-- **Компилятор:** gcc 16.1.1, сборка Release
-- **Инструмент:** `build/pxl_bench_stages <файл> 9 12`, медиана из 9 повторов
-- **Что изменено:** выбор фильтра поднят из пиксельного цикла на уровень строки.
-  Отдельный плотный цикл на каждый тип фильтра, отдельная ветка для первой
-  строки (`prev == NULL`: UP → копирование, PAETH → SUB, AVG → сдвиг), первые
-  `bpp` байт обрабатываются вне цикла, чтобы убрать проверку границ из тела.
-  Формат, файлы и совместимость не затронуты; `ctest` — 2/2 проходят.
+- **Commit:** `f5836cc` + a change to `rowfilter_decode` in `src/pxl_codec.c`
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15.2 GiB RAM
+- **Compiler:** gcc 16.1.1, Release build
+- **Tool:** `build/pxl_bench_stages <file> 9 12`, median of 9 repeats
+- **What changed:** filter selection lifted out of the pixel loop up to the row
+  level. A separate tight loop per filter type, a separate branch for the first
+  row (`prev == NULL`: UP → copy, PAETH → SUB, AVG → shift), the first `bpp`
+  bytes handled outside the loop to keep the bounds check out of the body.
+  Format, files and compatibility untouched; `ctest` — 2/2 pass.
 
-### Уровень 12, после изменения
+### Level 12, after the change
 
-| изображение | фильтр | zstd мс | расфильтр мс | итого мс | доля расфильтр. | байт |
+| image | filter | zstd ms | unfilter ms | total ms | unfilter share | bytes |
 |---|---|---:|---:|---:|---:|---:|
 | Photorealistic 3000×3000 RGB | adaptive | 235.910 | 339.558 | 575.469 | 59.0% | 11 550 315 |
 | | bcif | 208.902 | 21.135 | 230.036 | 9.2% | 11 458 339 |
@@ -229,32 +231,277 @@ libpng вместе с zlib.
 | | delta | 0.070 | 0.107 | 0.177 | 60.6% | 3 440 |
 | | none | 0.163 | 0.011 | 0.175 | 6.5% | 27 196 |
 
-### Расфильтровка adaptive: до и после
+### Adaptive unfiltering: before and after
 
-| изображение | было, мс | стало, мс | выигрыш |
+| image | before, ms | after, ms | gain |
 |---|---:|---:|---:|
 | Photorealistic 3000×3000 RGB | 405.655 | 339.558 | 16% |
 | fs8 3000×3000 grayscale | 136.717 | 106.516 | 22% |
 | palette chart 258×200 | 0.656 | 0.485 | 26% |
 
-Размеры в байтах не изменились ни на один байт — это ожидаемо, менялся только
-декодер. Совпадение байт-в-байт с предыдущей записью служит проверкой, что
-оптимизация ничего не сломала.
+Sizes in bytes did not change by a single byte — expected, only the decoder
+changed. The byte-for-byte match with the previous entry serves as a check that
+the optimization broke nothing.
 
-**Что из этого следует.**
+**What follows from this.**
 
-1. **Цель не достигнута.** Ставили на 60–80 мс, получили 339.6. Разрыв с delta
-   сократился с 20× до 16×, порядок величины остался.
-2. **Гипотеза подтверждена лишь частично.** Switch внутри пиксельного цикла
-   действительно стоил 16–26%, но он не был главной причиной. Остаток приходится
-   на сам Paeth: три зависимых от данных сравнения на байт, которые не
-   предсказываются. Ветвление никуда не делось от того, что мы вынесли из цикла
-   другое ветвление.
-3. **Выводы предыдущих записей в силе.** Adaptive не становится дефолтом,
-   отставание от QOI сохраняется, у BCIF остаётся 16-кратное преимущество по
-   расфильтровке при меньшем размере на фото. Решение по BCIF остаётся
-   приостановленным, и данные скорее против удаления, чем за.
-4. **Открытый вопрос для следующего шага:** статистика выбора фильтров по
-   корпусу. Если Paeth выбирается редко — оптимизировать его незачем; если часто —
-   дальнейшее ускорение требует либо SIMD (против цели «маленький портируемый
-   декодер»), либо сокращения набора фильтров, а это уже изменение формата.
+1. **The goal was not reached.** We aimed for 60–80 ms, we got 339.6. The gap
+   with delta shrank from 20x to 16x, the order of magnitude stayed.
+2. **The hypothesis is only partly confirmed.** The switch inside the pixel loop
+   did cost 16–26%, but it was not the main reason. The remainder falls on Paeth
+   itself: three data-dependent comparisons per byte that do not predict. Branching
+   did not go away just because we moved a different branch out of the loop.
+3. **The conclusions of the previous entries stand.** Adaptive does not become
+   the default, the gap behind QOI remains, BCIF keeps a 16x advantage in
+   unfiltering at a smaller size on photos. The BCIF decision stays on hold, and
+   the data is rather against removal than for it.
+4. **Open question for the next step:** filter selection statistics over the
+   corpus. If Paeth is chosen rarely there is no point optimizing it; if often,
+   further speedup requires either SIMD (against the "small portable decoder"
+   goal) or trimming the filter set, and that is already a format change.
+
+---
+
+## 2026-07-29 — filter selection statistics over the corpus
+
+- **Commit:** `0a69963` (+ uncommitted: `bench/rowstats.c`, CMakeLists.txt)
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15 GiB RAM
+- **Compiler:** gcc 16.1.1, Release build
+- **Tool:** `build/pxl_bench_rowstats` (new, `bench/rowstats.c`)
+
+Answers the open question of the previous entry: how often Paeth is chosen at
+all. The tool counts not only "what adaptive would choose" but what actually
+lands in the file: first it determines whether adaptive beats BCIF/delta/none on
+size, and only for the winning files does it count the rows that the decoder
+really unfilters.
+
+### Photos (Kodak, 24 files)
+
+BCIF wins the encoding in **all 24** files, adaptive in none. The Paeth share
+among rows that adaptive *would* choose ranges from 7.2% (13.png) to 98.4%
+(08.png), but those rows never land in the file. On photos the decoder does not
+unfilter per-row filters at all.
+
+### Rest of the corpus (165 readable files)
+
+Adaptive wins in 57 files (34.5%). Over those winners only, i.e. over the rows
+the decoder really unfilters:
+
+| | rows | bytes |
+|---|---:|---:|
+| total | 5016 | 9 359 680 |
+| of which Paeth | 4252 (84.77%) | 8 524 552 (91.08%) |
+
+**What follows from this.**
+
+1. **Paeth cannot be removed.** Where per-row filtering is applied at all, Paeth
+   accounts for 91% of the unfiltered bytes. The idea of trimming the set to
+   none/sub/up for the sake of decoder size is off: it would hit exactly those
+   files where adaptive was chosen.
+2. **The argument against removing BCIF got stronger.** 24/24 photos is the
+   class of images our 14.5% vs PNG rests on. The decision stays on hold pending
+   a timing measurement.
+3. **Sample bias.** The 165 files are mostly 32×32 from the official PNG suite,
+   so "34.5% of files" overstates adaptive's role. Quote the byte shares, not
+   the file share.
+
+## 2026-07-26 — decoder size: legacy zstd and the cost of a shared TU
+
+**Commit:** 0a69963 (+ `ZSTD_LEGACY_SUPPORT` edit) · **Hardware:** Intel Pentium
+B960 @ 2.20GHz · **Compiler:** GCC 16.1.1 · Release, `-O2`, `strip`, measuring
+`.text` of a statically linked minimal decoder
+(`bench/mindec_pxl.c`, `bench/mindec_png.c`: file → raw pixels, nothing else).
+
+### Baseline: libpng
+
+| | `.text` |
+|---|---:|
+| libpng (static) | 209 913 B |
+| inflate + adler32/crc32 from libz | ~20 214 B |
+| **total "PNG decoder"** | **~230 KB** |
+
+The inflate contribution is computed from symbol sizes in `libz.so.1` (there is
+no static zlib on the system), so it is an estimate, not an exact measurement.
+
+### PXL
+
+| | `.text` | Δ |
+|---|---:|---|
+| before | 862 KB | — |
+| `ZSTD_LEGACY_SUPPORT=OFF`, `ZSTD_MULTITHREAD=OFF` | **725 106 B** | −137 KB |
+| of which compress-side (unreachable for the decoder) | ~324 779 B | |
+| of which decompress-side | ~130 398 B | |
+
+The per-symbol breakdown is approximate: classification by name (`nm -S`), the
+remainder falls on shared zstd code, the libc glue and PXL itself.
+
+**What follows from this.**
+
+1. **zstd legacy support was free fat.** PXL reads only the frames it wrote
+   itself, it has no need for zstd 0.x frames. 137 KB went away without a single
+   code edit and without a format change; the tests (`roundtrip`, `fuzz_decode`)
+   pass.
+2. **The main cost item is not the format but the build.** 317 KB of compressor
+   land in the decoder only because `pxl_encode_ex` and `pxl_decode` sit in one
+   object file (`src/pxl_codec.c`, 1465 lines): the linker pulls the whole section.
+   Splitting the TU into encode/decode should give ~408 KB — already the same order
+   as libpng rather than a threefold loss.
+3. **The "decoder size" priority is achievable.** The earlier conclusion that
+   "the decoder is heavier than PNG because the algorithm differs" was wrong: it
+   was heavier because of dead code, not because of the algorithm.
+
+### Aside: a bug in the harness, not in the library
+
+`mindec_pxl` was built with `-Iinclude` (no such directory in the tree) and
+silently picked up a stale `/usr/local/include/pxl.h` from an earlier install. On
+the struct layout mismatch this produced `*** stack smashing detected ***`. With
+`-Isrc` the decoder returns `258x200 sum=14022381` — byte for byte the same as the
+libpng minimal decoder on the source PNG. The `.text` measurements were unaffected
+(725 106 B in both cases), but the takeaway: `/usr/local` in build paths is a
+source of false failures.
+
+## 2026-07-26 — TU split: the decoder got lighter than libpng
+
+**Commit:** working tree at 0a69963 · **Hardware:** Intel Pentium B960 @ 2.20GHz
+· **Compiler:** GCC 16.1.1 · Release, `-O2`, `strip`.
+
+`src/pxl_codec.c` (1465 lines) split into three translation units:
+`pxl_codec_common.c` (geometry, palette, shared helpers),
+`pxl_codec_encode.c`, `pxl_codec_decode.c`. Format and public API unchanged.
+
+### Methodology fixed
+
+The previous measurement (725 106 B) linked with `-static`, so all of glibc
+landed in `.text`. In the current build that is 542 072 B out of 671 789 B — i.e.
+the earlier figure was three quarters libc and comparing it to libpng was
+meaningless. Here libc is dynamic for both decoders, `.text` holds library code only.
+
+| decoder | `.text` |
+|---|---:|
+| PXL, shared TU (before) | 715 890 B |
+| **PXL, split TU (after)** | **162 034 B** |
+| libpng 1.6 (`libpng16.a`, zlib dynamic) | 209 913 B |
+| + inflate/crc32 from libz (estimated via `nm`) | ~20 214 B |
+| **total "PNG decoder"** | **~230 127 B** |
+
+### What follows from this
+
+1. **Minus 553 856 B, 4.4x — without a single algorithm edit.** No compressor is
+   left in the decoder: `nm` finds zero `ZSTD_compress*` symbols. Exactly three
+   objects link — `pxl_codec_common.o`, `pxl_codec_decode.o`, `pxl_io.o`.
+2. **The "decoder size" priority is met: 162 KB vs ~230 KB for PNG, 30%
+   lighter.** The "~408 KB" estimate from the previous entry turned out
+   pessimistic because it was computed off a libc-polluted base.
+3. **Verified it is the same decoder.** `roundtrip` and `fuzz_decode` pass; the
+   old and new builds on `Photorealistic_cover` give an identical
+   `3000x3000 sum=2878000537`, matching the libpng minimal decoder.
+
+**For the future:** any `.text` measurement with dynamic libc only, otherwise you
+are measuring glibc, not the format.
+
+## 2026-07-26 — branchless PAETH, and why BCIF stays
+
+**Commit:** working tree at 0a69963 · **Hardware:** Intel Pentium B960 @ 2.20GHz
+· **Compiler:** GCC 16.1.1 · Release. Median of 5 runs.
+
+Stage breakdown of decode time (`pxl_bench_stages`) ahead of the decision to
+remove BCIF. Format and public API unchanged.
+
+### 1. PAETH rewritten branchless
+
+`pxl_paeth` picked the predictor via `if`. Image data makes the choice
+unpredictable, and every misprediction costs the pipeline. Replacing it with
+masks (`m_a`, `m_b`) removes the branch entirely, the result is bit for bit the same.
+
+| stage | before | after |
+|---|---:|---:|
+| unfiltering, `Photorealistic_cover_fs8` (3000×3000, gray) | 405 ms | **105 ms** |
+| unfiltering share of decode | 88% | 68.8% |
+
+An isolated microbenchmark on 27 MB confirms the cause: the branchy version
+79 MB/s, branchless 143 MB/s (1.8x).
+
+### 2. Rejected: keeping neighbors a/c in registers
+
+The hypothesis was that byte `i` depends on `i-bpp`, which the previous iteration
+had just written, and that store-to-load forwarding sits on the critical path.
+Specializations for bpp 1/2/3/4 were written, holding `a` and `c` in variables.
+
+**Result: 177 ms vs 181 ms, no difference — code removed.** The hypothesis is
+refuted by a control measurement: SUB has exactly the same dependency on
+`cur[i-bpp]` yet runs at 1150 MB/s vs 143 for PAETH. So the ceiling is set by the
+per-byte cost of the formula itself, not by memory access.
+
+Order of magnitude for calibrating future ideas (27 MB, single thread):
+
+| filter | speed |
+|---|---:|
+| UP | 3920 MB/s |
+| SUB | 1150 MB/s |
+| PAETH branchless | 143 MB/s |
+| PAETH branchy | 79 MB/s |
+
+### 3. BCIF is not removed: it wins on both size and speed
+
+The plan was to remove BCIF as losing everywhere. The measurement refuted that.
+
+| file | mode | size | unfiltering | decode total |
+|---|---|---:|---:|---:|
+| Photorealistic_cover (3000×3000 RGB) | adaptive | 12 013 840 B | 193.8 ms | 275.9 ms |
+| | **bcif** | **11 272 231 B** | **22.3 ms** | **104.2 ms** |
+| palette_color_test_chart (200 rows) | adaptive | 8 091 B | 0.39 ms | 0.61 ms |
+| | **bcif** | **5 954 B** | **0.11 ms** | **0.22 ms**  |
+
+On color files BCIF is 6.2% and 26.4% smaller and unfilters 8.7x and 3.6x
+faster. The earlier conclusion that "BCIF loses everywhere" was drawn on an
+incomplete set.
+
+**Why.** `pxl_bench_rowstats`: adaptive picks PAETH on 94.8% of rows and 98.6%
+of bytes, i.e. it drives the decoder into the most expensive branch. Yet on both
+color files BCIF wins the encoding, so the number of rows the decoder really
+unfilters in adaptive mode is **zero**. On this set the expensive PAETH branch is
+simply never selected.
+
+BCIF does not apply to 8-bit gray: there adaptive wins (4 569 905 B). The same
+place shows a separate reserve — `delta` gives +0.37% size (4 586 860 B) but
+unfiltering of 17.3 ms vs 105.2 and a full decode of 71.6 ms vs 153.0, twice as
+fast. Filter selection optimizes size only and ignores the decode cost.
+
+**Decision: BCIF stays.** Candidate for the next step — factor unfiltering cost
+into filter selection; that is an encoder-only edit, the format does not change.
+
+---
+
+## 2026-07-28 — USC-SIPI converted to PNG, size across the whole corpus
+
+- **Commit:** 0a69963
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15.2 GiB RAM
+- **Measured:** PXL size vs source PNG over 396 files, split by color type
+- **With:** `pxltool c -l 12`, source PNGs written by libpng at default settings
+
+| Subset | Files | PNG, B | PXL, B | PXL/PNG |
+|---|---:|---:|---:|---:|
+| Kodak, RGB | 24 | — | — | 88.6% |
+| USC-SIPI, RGB (ct2 bd8) | 51 | 70 743 605 | 69 597 080 | 98.4% |
+| USC-SIPI, gray (ct0 bd8) | 158 | 33 586 150 | 33 700 173 | 100.3% |
+| USC-SIPI, gray (ct0 bd1) | 1 | 1 648 | 1 888 | 114.6% |
+| Whole corpus | 396 | — | — | 97.6% |
+
+**Result: the "15% smaller than PNG" claim holds only for true-color
+photographs.** On 8-bit grayscale USC-SIPI plates we are 0.3% *larger* than PNG,
+on the single 1-bit file 14.6% larger.
+
+**Why.** Two reasons, both mechanical. The color filter operates between
+channels, so on one channel it does nothing and only row filters + zstd remain
+against row filters + DEFLATE. And USC-SIPI aerials and textures are
+high-frequency: there is little spatial correlation left for the filters to
+remove, and zstd's edge over DEFLATE nearly vanishes. Kodak is smooth
+photography, the gain there is real.
+
+Not isolated: exactly why zstd-12 loses to DEFLATE on these plates. Noted
+separately — on `misc/5.1.09.png` (256x256, 1 channel) PNG is 42 351 B, PXL
+level 12 is 42 621 B and level **19 is 43 768 B**, i.e. a higher level makes the
+file bigger. Worth a look on its own.
+
+**Decision:** the README claim is narrowed to photographic content rather than
+quietly kept. 1-bit input is a separate weak spot, no work done on it yet.

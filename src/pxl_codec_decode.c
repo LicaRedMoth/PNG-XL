@@ -1,13 +1,11 @@
-/** \file pxl_codec.c
-    \brief PNG XL codec core: reversible filtering + zstd compression.
+/** \file pxl_codec_decode.c
+    \brief Decoder: zstd decompression, reverse filters, streaming decoder.
 
-    The filter stage is ported from Zpng (Christopher A. Taylor, BSD):
-      - generic path: subtract each channel value from the pixel to its left;
-      - RGB/RGBA 8-bit: additionally apply the BCIF color transform
-        (y=b, u=g-b, v=g-r) and split output into separate color planes.
-    The filtered bytes are then compressed with zstd.
+    References only ZSTD_decompress* and friends, never the compressor, so a
+    program that decodes but never encodes links a much smaller binary.
 */
 #include "pxl.h"
+#include "pxl_codec_internal.h"
 #include "pxl_format.h"
 
 #include <zstd.h>
@@ -15,63 +13,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Decode-side resource limits. A 24-byte header can claim any geometry, and
-   the filtered stream that backs it compresses to almost nothing (a run of
-   zeros), so without a cap a few-hundred-byte file forces multi-gigabyte
-   allocations in pxl_decode/stream_begin. Mirrors APNG_MAX_DIM/
-   APNG_MAX_PIXELS in apng.c. */
-#define PXL_MAX_DIM     1000000u
-#define PXL_MAX_PIXELS  ((uint64_t)1 << 28)
-
-uint8_t pxl_bit_depth(const pxl_image* img)
-{
-    if (!img) { return 0; }
-    if (img->bit_depth) { return img->bit_depth; }
-    return (uint8_t)(img->bytes_per_channel * 8u);
-}
-
-unsigned pxl_palette_count(const pxl_image* img)
-{
-    if (!img || !img->palette.data) { return 0; }
-    return (unsigned)(img->palette.size / 3u);
-}
-
-int pxl_is_indexed(const pxl_image* img)
-{
-    return pxl_palette_count(img) > 0;
-}
-
-size_t pxl_row_bytes(const pxl_image* img)
-{
-    if (!img) { return 0; }
-    return pxl_row_bytes_of(img->width, img->channels, pxl_bit_depth(img));
-}
-
-/* Validates the palette section against the image. On success writes the entry
-   and alpha counts. Indexed images are single-channel by construction. */
-static int palette_ok(const pxl_image* img, uint8_t depth,
-                      unsigned* count, unsigned* alpha)
-{
-    unsigned n = pxl_palette_count(img);
-    size_t na = img->palette_alpha.data ? img->palette_alpha.size : 0;
-
-    if (n == 0) {
-        /* No palette: a sub-byte depth is still legal (PNG gray 1/2/4). */
-        if (na != 0) { return 0; } /* alpha without a palette is meaningless */
-        *count = 0;
-        *alpha = 0;
-        return 1;
-    }
-    if (img->palette.size % 3u != 0 || n > PXL_MAX_PALETTE) { return 0; }
-    if (img->channels != 1 || depth > 8) { return 0; }
-    /* Indices must be representable at this depth. */
-    if (depth < 8 && n > (1u << depth)) { return 0; }
-    if (na > n) { return 0; }
-    *count = n;
-    *alpha = (unsigned)na;
-    return 1;
-}
 
 /* Rejects indices that address a palette entry that does not exist.
 
@@ -110,6 +51,7 @@ static int row_indices_ok(const uint8_t* row, uint32_t width, uint8_t depth,
     return 1;
 }
 
+
 /* Whole-buffer form of the above, for the one-shot decoder. */
 static int indices_ok(const uint8_t* pixels, size_t row_bytes, uint32_t width,
                       uint32_t height, uint8_t depth, unsigned count)
@@ -124,83 +66,6 @@ static int indices_ok(const uint8_t* pixels, size_t row_bytes, uint32_t width,
     return 1;
 }
 
-/* Returns 1 if the header geometry is within the decode limits. */
-static int geometry_ok(uint32_t width, uint32_t height, unsigned pixel_bytes)
-{
-    if (width == 0 || height == 0) {
-        return 0;
-    }
-    if (width > PXL_MAX_DIM || height > PXL_MAX_DIM) {
-        return 0;
-    }
-    if ((uint64_t)width * height > PXL_MAX_PIXELS) {
-        return 0;
-    }
-    /* With pixels capped at 2^28 and pixel_bytes at 8, width*height*pixel_bytes
-       tops out at 2^31 and cannot overflow size_t on any supported target. */
-    (void)pixel_bytes;
-    return 1;
-}
-
-/* Filter geometry for one image. The filters work on byte rows, so a sub-byte
-   depth (1/2/4) is filtered as a row of packed bytes: filter_width becomes the
-   packed row length and pixel_bytes becomes 1, which is exactly what PNG does
-   for depths below 8. For 8/16-bit rows this is the old behaviour unchanged. */
-typedef struct {
-    unsigned pixel_bytes;  /* bytes per filter unit (1 for sub-byte depths) */
-    uint32_t filter_width; /* units per row as seen by the filters */
-    size_t   row_bytes;    /* packed bytes per scanline */
-    size_t   raw_bytes;    /* row_bytes * height */
-} pxl_geometry;
-
-/* Returns 1 and fills g on success, 0 if the geometry is invalid or too big. */
-static int geometry_of(uint32_t width, uint32_t height, uint8_t channels,
-                       uint8_t depth, pxl_geometry* g)
-{
-    size_t row = pxl_row_bytes_of(width, channels, depth);
-
-    if (row == 0 || !geometry_ok(width, height, 1)) {
-        return 0;
-    }
-    if (depth >= 8) {
-        g->pixel_bytes = (unsigned)channels * (unsigned)(depth / 8u);
-        g->filter_width = width;
-    } else {
-        g->pixel_bytes = 1;
-        /* Packed rows stay under PXL_MAX_DIM bytes, so this fits uint32_t. */
-        g->filter_width = (uint32_t)row;
-    }
-    if (!geometry_ok(g->filter_width, height, g->pixel_bytes)) {
-        return 0;
-    }
-    g->row_bytes = row;
-    g->raw_bytes = row * (size_t)height;
-    return 1;
-}
-
-/*----------------------------------------------------------------------------
-  Generic filter: per-channel left delta, for any bytes-per-pixel 1..8.
-  Operates on the interleaved pixel buffer in place-to-output.
-----------------------------------------------------------------------------*/
-
-static void pack_delta(const uint8_t* input, uint8_t* output,
-                       uint32_t width, uint32_t height, unsigned pixel_bytes)
-{
-    uint32_t y, x;
-    unsigned i;
-    for (y = 0; y < height; ++y) {
-        uint8_t prev[8] = { 0 };
-        for (x = 0; x < width; ++x) {
-            for (i = 0; i < pixel_bytes; ++i) {
-                uint8_t a = input[i];
-                output[i] = (uint8_t)(a - prev[i]);
-                prev[i] = a;
-            }
-            input += pixel_bytes;
-            output += pixel_bytes;
-        }
-    }
-}
 
 /* Reconstruct one DELTA row. Each row is independent (prev resets to 0), so
    this is reused by the streaming decoder. */
@@ -221,6 +86,7 @@ static void unpack_delta_row(const uint8_t* input, uint8_t* output,
     }
 }
 
+
 static void unpack_delta(const uint8_t* input, uint8_t* output,
                          uint32_t width, uint32_t height, unsigned pixel_bytes)
 {
@@ -232,37 +98,6 @@ static void unpack_delta(const uint8_t* input, uint8_t* output,
     }
 }
 
-/*----------------------------------------------------------------------------
-  BCIF filter for 8-bit RGB (3 channels): delta-left + YUV transform + planes.
-----------------------------------------------------------------------------*/
-
-static void pack_bcif3(const uint8_t* input, uint8_t* output,
-                       uint32_t width, uint32_t height)
-{
-    const uint32_t plane = width * height;
-    uint8_t* out_y = output;
-    uint8_t* out_u = output + plane;
-    uint8_t* out_v = output + plane * 2;
-    uint32_t row, x;
-
-    for (row = 0; row < height; ++row) {
-        uint8_t prev[3] = { 0 };
-        for (x = 0; x < width; ++x) {
-            uint8_t r = (uint8_t)(input[0] - prev[0]);
-            uint8_t g = (uint8_t)(input[1] - prev[1]);
-            uint8_t b = (uint8_t)(input[2] - prev[2]);
-            prev[0] = input[0];
-            prev[1] = input[1];
-            prev[2] = input[2];
-
-            *out_y++ = b;
-            *out_u++ = (uint8_t)(g - b);
-            *out_v++ = (uint8_t)(g - r);
-
-            input += 3;
-        }
-    }
-}
 
 static void unpack_bcif3(const uint8_t* input, uint8_t* output,
                          uint32_t width, uint32_t height)
@@ -302,42 +137,6 @@ static void unpack_bcif3(const uint8_t* input, uint8_t* output,
     }
 }
 
-/*----------------------------------------------------------------------------
-  BCIF filter for 8-bit RGBA (4 channels): as RGB, plus a plain delta alpha
-  plane.
-----------------------------------------------------------------------------*/
-
-static void pack_bcif4(const uint8_t* input, uint8_t* output,
-                       uint32_t width, uint32_t height)
-{
-    const uint32_t plane = width * height;
-    uint8_t* out_y = output;
-    uint8_t* out_u = output + plane;
-    uint8_t* out_v = output + plane * 2;
-    uint8_t* out_a = output + plane * 3;
-    uint32_t row, x;
-
-    for (row = 0; row < height; ++row) {
-        uint8_t prev[4] = { 0 };
-        for (x = 0; x < width; ++x) {
-            uint8_t r = (uint8_t)(input[0] - prev[0]);
-            uint8_t g = (uint8_t)(input[1] - prev[1]);
-            uint8_t b = (uint8_t)(input[2] - prev[2]);
-            uint8_t a = (uint8_t)(input[3] - prev[3]);
-            prev[0] = input[0];
-            prev[1] = input[1];
-            prev[2] = input[2];
-            prev[3] = input[3];
-
-            *out_y++ = b;
-            *out_u++ = (uint8_t)(g - b);
-            *out_v++ = (uint8_t)(g - r);
-            *out_a++ = a;
-
-            input += 4;
-        }
-    }
-}
 
 static void unpack_bcif4(const uint8_t* input, uint8_t* output,
                          uint32_t width, uint32_t height)
@@ -379,59 +178,6 @@ static void unpack_bcif4(const uint8_t* input, uint8_t* output,
 
             output += 4;
         }
-    }
-}
-
-/*----------------------------------------------------------------------------
-  Adaptive PNG-style per-row filters (None/Sub/Up/Average/Paeth).
-
-  These operate byte-wise. The left neighbor `a` is the byte `bpp` positions
-  back (the same byte in the previous pixel), `b` is the byte directly above,
-  `c` is the byte above-left -- exactly as in the PNG specification. The
-  encoder chooses, per row, the filter minimizing the sum of absolute signed
-  residuals (PNG's standard minimum-sum-of-absolute-differences heuristic).
-
-  The filtered stream stores, per row: one filter-type byte followed by the
-  filtered row. So its length is height * (1 + row_stride), larger than the raw
-  pixels -- but far more compressible.
-----------------------------------------------------------------------------*/
-
-#define PXL_ROWF_NONE 0
-#define PXL_ROWF_SUB  1
-#define PXL_ROWF_UP   2
-#define PXL_ROWF_AVG  3
-#define PXL_ROWF_PAETH 4
-
-static uint8_t paeth(uint8_t a, uint8_t b, uint8_t c)
-{
-    int p = (int)a + (int)b - (int)c;
-    int pa = p > a ? p - a : a - p;
-    int pb = p > b ? p - b : b - p;
-    int pc = p > c ? p - c : c - p;
-    if (pa <= pb && pa <= pc) return a;
-    if (pb <= pc) return b;
-    return c;
-}
-
-/* Encode one row with a given filter type into `out` (row_stride bytes). */
-static void rowfilter_encode(uint8_t type, const uint8_t* cur, const uint8_t* prev,
-                             uint8_t* out, size_t stride, unsigned bpp)
-{
-    size_t i;
-    for (i = 0; i < stride; ++i) {
-        uint8_t x = cur[i];
-        uint8_t a = (i >= bpp) ? cur[i - bpp] : 0;
-        uint8_t b = prev ? prev[i] : 0;
-        uint8_t c = (prev && i >= bpp) ? prev[i - bpp] : 0;
-        uint8_t pred;
-        switch (type) {
-            case PXL_ROWF_SUB:   pred = a; break;
-            case PXL_ROWF_UP:    pred = b; break;
-            case PXL_ROWF_AVG:   pred = (uint8_t)(((int)a + (int)b) >> 1); break;
-            case PXL_ROWF_PAETH: pred = paeth(a, b, c); break;
-            default:             pred = 0; break; /* NONE */
-        }
-        out[i] = (uint8_t)(x - pred);
     }
 }
 
@@ -488,10 +234,10 @@ static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* pre
             return;
         case PXL_ROWF_PAETH:
             for (i = 0; i < head; ++i)
-                cur[i] = (uint8_t)(in[i] + prev[i]); /* paeth(0, b, 0) == b */
+                cur[i] = (uint8_t)(in[i] + prev[i]);
             for (i = head; i < stride; ++i)
                 cur[i] = (uint8_t)(in[i] +
-                                   paeth(cur[i - bpp], prev[i], prev[i - bpp]));
+                                   pxl_paeth(cur[i - bpp], prev[i], prev[i - bpp]));
             return;
         default: /* NONE */
             memcpy(cur, in, stride);
@@ -499,64 +245,6 @@ static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* pre
     }
 }
 
-/* Sum of absolute signed residuals -- PNG's filter-selection heuristic. */
-static unsigned long row_score(const uint8_t* row, size_t stride)
-{
-    unsigned long s = 0;
-    size_t i;
-    for (i = 0; i < stride; ++i) {
-        int v = (signed char)row[i];
-        s += (unsigned long)(v < 0 ? -v : v);
-    }
-    return s;
-}
-
-static size_t adaptive_filtered_size(uint32_t width, uint32_t height, unsigned pixel_bytes)
-{
-    size_t stride = (size_t)width * pixel_bytes;
-    return (size_t)height * (1 + stride);
-}
-
-/* Pack pixels with per-row adaptive filtering. Returns bytes written, or 0 on
-   allocation failure. */
-static size_t pack_adaptive(const uint8_t* input, uint8_t* output,
-                            uint32_t width, uint32_t height, unsigned pixel_bytes)
-{
-    size_t stride = (size_t)width * pixel_bytes;
-    uint8_t* cand = (uint8_t*)malloc(stride);
-    uint8_t* best = (uint8_t*)malloc(stride);
-    uint8_t* op = output;
-    uint32_t y;
-    unsigned bpp = pixel_bytes;
-
-    if (!cand || !best) { free(cand); free(best); return 0; }
-
-    for (y = 0; y < height; ++y) {
-        const uint8_t* cur = input + (size_t)y * stride;
-        const uint8_t* prev = y ? input + (size_t)(y - 1) * stride : NULL;
-        uint8_t best_type = PXL_ROWF_NONE;
-        unsigned long best_s = (unsigned long)-1;
-        uint8_t t;
-
-        for (t = 0; t <= PXL_ROWF_PAETH; ++t) {
-            unsigned long s;
-            rowfilter_encode(t, cur, prev, cand, stride, bpp);
-            s = row_score(cand, stride);
-            if (s < best_s) {
-                best_s = s;
-                best_type = t;
-                { uint8_t* tmp = best; best = cand; cand = tmp; }
-            }
-        }
-        *op++ = best_type;
-        memcpy(op, best, stride);
-        op += stride;
-    }
-
-    free(cand);
-    free(best);
-    return (size_t)(op - output);
-}
 
 /* Reverse per-row adaptive filtering. Returns 1 on success, 0 on malformed
    input (e.g. bad filter-type byte or size mismatch). */
@@ -568,7 +256,7 @@ static int unpack_adaptive(const uint8_t* input, size_t input_size, uint8_t* out
     uint32_t y;
     unsigned bpp = pixel_bytes;
 
-    if (input_size != adaptive_filtered_size(width, height, pixel_bytes)) {
+    if (input_size != pxl_filtered_size(PXL_FILTER_ADAPTIVE, width, height, pixel_bytes)) {
         return 0;
     }
     for (y = 0; y < height; ++y) {
@@ -584,59 +272,6 @@ static int unpack_adaptive(const uint8_t* input, size_t input_size, uint8_t* out
     return 1;
 }
 
-/*----------------------------------------------------------------------------
-  Filter selection
-----------------------------------------------------------------------------*/
-
-/* Pick the color filter for the given geometry. BCIF is used only for 8-bit
-   RGB/RGBA (where the YUV transform and plane split apply); everything else
-   uses the generic per-channel delta. */
-static uint8_t choose_filter(uint8_t channels, uint8_t bytes_per_channel)
-{
-    if (bytes_per_channel == 1 && (channels == 3 || channels == 4)) {
-        return PXL_FILTER_BCIF;
-    }
-    return PXL_FILTER_DELTA;
-}
-
-/* Size of the filtered buffer produced by `filter` for the given geometry. */
-static size_t filtered_size(uint8_t filter, uint32_t width, uint32_t height,
-                            unsigned pixel_bytes)
-{
-    if (filter == PXL_FILTER_ADAPTIVE) {
-        return adaptive_filtered_size(width, height, pixel_bytes);
-    }
-    return (size_t)width * height * pixel_bytes;
-}
-
-/* Apply `filter`, writing into output. Returns bytes written, 0 on failure. */
-static size_t apply_filter(uint8_t filter, unsigned pixel_bytes,
-                           const uint8_t* input, uint8_t* output,
-                           uint32_t width, uint32_t height)
-{
-    size_t raw = (size_t)width * height * pixel_bytes;
-    if (filter == PXL_FILTER_ADAPTIVE) {
-        return pack_adaptive(input, output, width, height, pixel_bytes);
-    }
-    if (filter == PXL_FILTER_NONE) {
-        /* Palette indices are labels, not magnitudes: subtracting neighboring
-           indices manufactures noise out of a smooth image. Storing them
-           verbatim lets zstd match the byte patterns directly, which is both
-           smaller on such images and the cheapest possible decode. */
-        memcpy(output, input, raw);
-        return raw;
-    }
-    if (filter == PXL_FILTER_BCIF) {
-        if (pixel_bytes == 3) {
-            pack_bcif3(input, output, width, height);
-        } else {
-            pack_bcif4(input, output, width, height);
-        }
-    } else {
-        pack_delta(input, output, width, height, (unsigned)pixel_bytes);
-    }
-    return raw;
-}
 
 /* Reverse `filter`. `input`/`input_size` is the decompressed filtered data;
    output receives width*height*pixel_bytes pixel bytes. Returns 1 on success. */
@@ -670,184 +305,6 @@ static int reverse_filter(uint8_t filter, unsigned pixel_bytes,
     return 1;
 }
 
-/*----------------------------------------------------------------------------
-  Public codec API
-----------------------------------------------------------------------------*/
-
-pxl_buffer pxl_encode(const pxl_image* img, int zstd_level)
-{
-    return pxl_encode_ex(img, zstd_level, 0);
-}
-
-pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
-{
-    pxl_buffer out;
-    uint8_t* filtered = NULL;
-    uint8_t* best = NULL;
-    uint8_t* work = NULL;
-    uint8_t* best_frame = NULL;
-    uint8_t* file = NULL;
-    size_t raw_bytes, bound, csize = 0, meta_size, palette_bytes;
-    size_t max_filtered, filtered_bytes = 0;
-    unsigned pixel_bytes;
-    unsigned pal_count, pal_alpha;
-    uint8_t depth;
-    pxl_geometry g;
-    uint8_t filter = PXL_FILTER_DELTA;
-    /* One slot per filter ID: every candidate is tried at most once, so this can
-       never overflow as long as it tracks PXL_FILTER_MAX. */
-    uint8_t candidates[PXL_FILTER_MAX + 1];
-    int n_candidates = 0;
-    int ci;
-    pxl_header h;
-
-    out.data = NULL;
-    out.size = 0;
-
-    if (!img || !img->buffer.data || img->width == 0 || img->height == 0) {
-        return out;
-    }
-    if (img->channels < 1 || img->channels > 4) {
-        return out;
-    }
-    if (img->bytes_per_channel != 1 && img->bytes_per_channel != 2) {
-        return out;
-    }
-    depth = pxl_bit_depth(img);
-    /* bit_depth and bytes_per_channel must agree: 16-bit samples occupy two
-       bytes, everything else (1/2/4/8) exactly one. */
-    if (img->bytes_per_channel != (depth == 16 ? 2u : 1u)) {
-        return out;
-    }
-    if (!palette_ok(img, depth, &pal_count, &pal_alpha)) {
-        return out;
-    }
-    if (!geometry_of(img->width, img->height, img->channels, depth, &g)) {
-        return out;
-    }
-    pixel_bytes = g.pixel_bytes;
-    raw_bytes = g.raw_bytes;
-    if (img->buffer.size < raw_bytes) {
-        return out; /* caller's buffer is too small for the stated geometry */
-    }
-
-    if (zstd_level <= 0) {
-        zstd_level = PXL_LEVEL_DEFAULT;
-    } else if (zstd_level > PXL_LEVEL_MAX) {
-        zstd_level = PXL_LEVEL_MAX;
-    }
-
-    /* Build the candidate filter list. We always try the adaptive PNG-style
-       filter (it matches or beats a single global filter on almost any image),
-       the generic delta, and no filter at all; for 8-bit RGB/RGBA we also try
-       BCIF. The smallest compressed result wins.
-
-       "No filter" is not redundant: on palette images the samples are labels
-       rather than magnitudes, so every differencing filter turns a smooth image
-       into noise and loses to storing the indices verbatim. It is also the
-       fastest possible decode, so ties are worth taking.
-
-       The list is ordered cheapest-to-decode first, and a later candidate must
-       be strictly smaller to displace an earlier one, so an exact size tie is
-       resolved in favor of the faster decode. */
-    candidates[n_candidates++] = PXL_FILTER_NONE;
-    candidates[n_candidates++] = PXL_FILTER_DELTA;
-    candidates[n_candidates++] = PXL_FILTER_ADAPTIVE;
-    /* BCIF splits into color planes, which breaks top-to-bottom streaming, so
-       the progressive flag excludes it. */
-    if (!(flags & PXL_ENCODE_PROGRESSIVE) && pal_count == 0 &&
-        choose_filter(img->channels, (uint8_t)(depth / 8u)) == PXL_FILTER_BCIF) {
-        candidates[n_candidates++] = PXL_FILTER_BCIF;
-    }
-
-    /* Filtered buffers vary in size; adaptive is the largest. Size the scratch
-       buffer and compress bound to the largest candidate. */
-    max_filtered = raw_bytes;
-    for (ci = 0; ci < n_candidates; ++ci) {
-        size_t fs = filtered_size(candidates[ci], g.filter_width, img->height, pixel_bytes);
-        if (fs > max_filtered) { max_filtered = fs; }
-    }
-    bound = ZSTD_compressBound(max_filtered);
-    filtered = (uint8_t*)malloc(max_filtered);
-    /* best/work hold the compressed frame only (no header). We swap them
-       whenever the current candidate is smaller, so the best frame is never
-       overwritten by a later, larger one. */
-    best = (uint8_t*)malloc(bound);
-    work = (uint8_t*)malloc(bound);
-    if (!filtered || !best || !work) {
-        free(filtered);
-        free(best);
-        free(work);
-        return out;
-    }
-
-    for (ci = 0; ci < n_candidates; ++ci) {
-        uint8_t cand = candidates[ci];
-        size_t fsize, csz;
-        fsize = apply_filter(cand, pixel_bytes, img->buffer.data, filtered,
-                             g.filter_width, img->height);
-        if (fsize == 0) {
-            continue; /* filter failed (e.g. OOM in adaptive) */
-        }
-        csz = ZSTD_compress(work, bound, filtered, fsize, zstd_level);
-        if (ZSTD_isError(csz)) {
-            continue;
-        }
-        if (best_frame == NULL || csz < csize) {
-            uint8_t* tmp = best; /* promote work -> best, reuse old best as work */
-            best = work;
-            work = tmp;
-            csize = csz;
-            filter = cand;
-            filtered_bytes = fsize;
-            best_frame = best; /* marker that we have a result */
-        }
-    }
-    free(filtered);
-    free(work);
-
-    if (best_frame == NULL) {
-        free(best);
-        return out;
-    }
-
-    /* Assemble container: header + palette section + metadata block + frame. */
-    meta_size = (img->metadata.data && img->metadata.size) ? img->metadata.size : 0;
-    palette_bytes = (size_t)pal_count * 3u + (size_t)pal_alpha;
-    file = (uint8_t*)malloc(PXL_HEADER_BYTES + palette_bytes + meta_size + csize);
-    if (!file) {
-        free(best);
-        return out;
-    }
-
-    h.version = PXL_VERSION;
-    h.channels = img->channels;
-    h.bit_depth = depth;
-    h.color_filter = filter;
-    h.width = img->width;
-    h.height = img->height;
-    h.raw_byte_count = (uint32_t)filtered_bytes; /* size of the filtered stream */
-    h.meta_byte_count = (uint32_t)meta_size;
-    h.palette_count = (uint16_t)pal_count;
-    h.palette_alpha_count = (uint16_t)pal_alpha;
-    pxl_header_write(file, &h);
-    if (pal_count) {
-        memcpy(file + PXL_HEADER_BYTES, img->palette.data, (size_t)pal_count * 3u);
-        if (pal_alpha) {
-            memcpy(file + PXL_HEADER_BYTES + (size_t)pal_count * 3u,
-                   img->palette_alpha.data, pal_alpha);
-        }
-    }
-    if (meta_size) {
-        memcpy(file + PXL_HEADER_BYTES + palette_bytes, img->metadata.data, meta_size);
-    }
-    memcpy(file + PXL_HEADER_BYTES + palette_bytes + meta_size, best, csize);
-    free(best);
-
-    out.data = file;
-    out.size = PXL_HEADER_BYTES + palette_bytes + meta_size + csize;
-    return out;
-}
 
 pxl_image pxl_decode(pxl_buffer file)
 {
@@ -865,7 +322,7 @@ pxl_image pxl_decode(pxl_buffer file)
         return img;
     }
 
-    if (!geometry_of(h.width, h.height, h.channels, h.bit_depth, &g)) {
+    if (!pxl_geometry_of(h.width, h.height, h.channels, h.bit_depth, &g)) {
         return img;
     }
     pixel_bytes = g.pixel_bytes;
@@ -875,7 +332,7 @@ pxl_image pxl_decode(pxl_buffer file)
        filter/geometry so we never trust the header blindly for allocation. */
     if (h.color_filter > PXL_FILTER_MAX ||
         (size_t)h.raw_byte_count !=
-            filtered_size(h.color_filter, g.filter_width, h.height, pixel_bytes)) {
+            pxl_filtered_size(h.color_filter, g.filter_width, h.height, pixel_bytes)) {
         return img;
     }
     pixel_bytes_total = g.raw_bytes;
@@ -987,6 +444,7 @@ pxl_image pxl_decode(pxl_buffer file)
     return img;
 }
 
+
 /*----------------------------------------------------------------------------
   Streaming (progressive) decode
 
@@ -1085,6 +543,7 @@ static int stream_emit_rows(pxl_stream* s)
     return emitted;
 }
 
+
 /* Validate the parsed header and allocate the working buffers. */
 static int stream_begin(pxl_stream* s)
 {
@@ -1093,14 +552,14 @@ static int stream_begin(pxl_stream* s)
     if (!pxl_header_read(s->hdr, PXL_HEADER_BYTES, &s->h)) {
         return 0;
     }
-    if (!geometry_of(s->h.width, s->h.height, s->h.channels, s->h.bit_depth,
+    if (!pxl_geometry_of(s->h.width, s->h.height, s->h.channels, s->h.bit_depth,
                      &s->g)) {
         return 0;
     }
     s->pixel_bytes = s->g.pixel_bytes;
     if (s->h.color_filter > PXL_FILTER_MAX ||
         (size_t)s->h.raw_byte_count !=
-            filtered_size(s->h.color_filter, s->g.filter_width, s->h.height,
+            pxl_filtered_size(s->h.color_filter, s->g.filter_width, s->h.height,
                           s->pixel_bytes)) {
         return 0;
     }
@@ -1164,6 +623,7 @@ static int stream_begin(pxl_stream* s)
     return 1;
 }
 
+
 pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user)
 {
     pxl_stream* s = (pxl_stream*)calloc(1, sizeof(*s));
@@ -1175,6 +635,7 @@ pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user)
     s->state = PXL_ST_HEADER;
     return s;
 }
+
 
 int pxl_stream_feed(pxl_stream* s, const void* data, size_t len)
 {
@@ -1299,6 +760,7 @@ int pxl_stream_feed(pxl_stream* s, const void* data, size_t len)
     return total;
 }
 
+
 const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready)
 {
     if (!s || !s->img.buffer.data) {
@@ -1310,6 +772,7 @@ const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready)
     }
     return &s->img;
 }
+
 
 int pxl_stream_finish(pxl_stream* s)
 {
@@ -1337,6 +800,7 @@ int pxl_stream_finish(pxl_stream* s)
     return s->rows_done == s->h.height;
 }
 
+
 void pxl_stream_free(pxl_stream* s)
 {
     if (!s) {
@@ -1348,118 +812,4 @@ void pxl_stream_free(pxl_stream* s)
     free(s->filtered);
     pxl_image_free(&s->img);
     free(s);
-}
-
-/* Reads sample \p x of a packed MSB-first row at sub-byte \p depth. */
-static unsigned sample_at(const unsigned char* row, uint32_t x, uint8_t depth)
-{
-    unsigned per_byte = 8u / depth;
-    unsigned mask     = (1u << depth) - 1u;
-    unsigned shift    = 8u - depth * (unsigned)(x % per_byte) - depth;
-    return (unsigned)((row[x / per_byte] >> shift) & mask);
-}
-
-pxl_image pxl_image_expand(const pxl_image* img)
-{
-    pxl_image out;
-    uint8_t   depth;
-    unsigned  count, has_alpha;
-    size_t    src_row, dst_row, total;
-    uint32_t  x, y;
-
-    memset(&out, 0, sizeof(out));
-    if (!img || !img->buffer.data) {
-        return out;
-    }
-    depth   = pxl_bit_depth(img);
-    src_row = pxl_row_bytes(img);
-    if (src_row == 0 || img->buffer.size < src_row * (size_t)img->height) {
-        return out;
-    }
-
-    /* Nothing to expand: hand back a deep copy of the pixels only. */
-    if (!pxl_is_indexed(img) && depth >= 8) {
-        out.buffer.data = (unsigned char*)malloc(img->buffer.size);
-        if (!out.buffer.data) { return out; }
-        memcpy(out.buffer.data, img->buffer.data, img->buffer.size);
-        out.buffer.size       = img->buffer.size;
-        out.width             = img->width;
-        out.height            = img->height;
-        out.channels          = img->channels;
-        out.bytes_per_channel = img->bytes_per_channel;
-        out.bit_depth         = depth;
-        return out;
-    }
-
-    count     = pxl_palette_count(img);
-    has_alpha = (count && img->palette_alpha.data &&
-                 img->palette_alpha.size) ? 1u : 0u;
-    out.width             = img->width;
-    out.height            = img->height;
-    out.channels          = count ? (uint8_t)(has_alpha ? 4 : 3) : 1;
-    out.bytes_per_channel = 1;
-    out.bit_depth         = 8;
-
-    dst_row = pxl_row_bytes(&out);
-    if (dst_row == 0 || dst_row / out.channels < img->width) {
-        memset(&out, 0, sizeof(out));
-        return out;
-    }
-    total = dst_row * (size_t)img->height;
-    out.buffer.data = (unsigned char*)malloc(total);
-    if (!out.buffer.data) {
-        memset(&out, 0, sizeof(out));
-        return out;
-    }
-    out.buffer.size = total;
-
-    for (y = 0; y < img->height; ++y) {
-        const unsigned char* in = img->buffer.data + (size_t)y * src_row;
-        unsigned char* dst      = out.buffer.data + (size_t)y * dst_row;
-
-        for (x = 0; x < img->width; ++x) {
-            unsigned s = (depth == 8) ? in[x] : sample_at(in, x, depth);
-
-            if (count) {
-                /* Indices were validated on decode, but this entry point is
-                   public: clamp rather than read past the palette. */
-                if (s >= count) { s = count - 1u; }
-                *dst++ = img->palette.data[s * 3u + 0u];
-                *dst++ = img->palette.data[s * 3u + 1u];
-                *dst++ = img->palette.data[s * 3u + 2u];
-                if (has_alpha) {
-                    *dst++ = (s < img->palette_alpha.size)
-                             ? img->palette_alpha.data[s] : 0xFFu;
-                }
-            } else {
-                /* Gray 1/2/4 -> 8 bits, scaled so the max value stays white. */
-                *dst++ = (unsigned char)(s * 255u / ((1u << depth) - 1u));
-            }
-        }
-    }
-    return out;
-}
-
-void pxl_free(pxl_buffer* buffer)
-{
-    if (buffer && buffer->data) {
-        free(buffer->data);
-        buffer->data = NULL;
-        buffer->size = 0;
-    }
-}
-
-void pxl_image_free(pxl_image* img)
-{
-    if (img) {
-        pxl_free(&img->buffer);
-        pxl_free(&img->metadata);
-        pxl_free(&img->palette);
-        pxl_free(&img->palette_alpha);
-    }
-}
-
-const char* pxl_version(void)
-{
-    return "1.5.0";
 }

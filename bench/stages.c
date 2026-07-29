@@ -8,9 +8,9 @@
     ~19 KB of code and is ours to optimise.
 
     pxl_decode() does both stages back to back, so timing it from outside
-    cannot separate them. The stage helpers (geometry_of, filtered_size,
-    reverse_filter) are static inside pxl_codec.c, so this tool includes that
-    translation unit directly and reimplements the decode path stage by stage.
+    cannot separate them. The stage helpers (apply_filter, reverse_filter) are
+    static inside the codec's encode/decode units, so this tool includes those
+    translation units directly and reimplements the decode path stage by stage.
     That keeps the measurement honest (same code, same flags) without widening
     the library's public surface for a benchmark.
 
@@ -21,7 +21,8 @@
     each stage over `reps` runs.
 */
 
-#include "../src/pxl_codec.c"
+#include "../src/pxl_codec_encode.c"
+#include "../src/pxl_codec_decode.c"
 
 #include "../src/pxl_png.h"
 
@@ -89,12 +90,12 @@ static int measure(const pxl_image* img, uint8_t filter, int level, int reps,
         return 0;
     }
 
-    if (!geometry_of(img->width, img->height, img->channels, depth, &g)) {
+    if (!pxl_geometry_of(img->width, img->height, img->channels, depth, &g)) {
         return 0;
     }
 
-    max_filtered = filtered_size(filter, g.filter_width, img->height,
-                                 g.pixel_bytes);
+    max_filtered = pxl_filtered_size(filter, g.filter_width, img->height,
+                                     g.pixel_bytes);
     bound        = ZSTD_compressBound(max_filtered);
     staging  = (uint8_t*)malloc(max_filtered);
     frame    = (uint8_t*)malloc(bound);
