@@ -184,8 +184,8 @@ static void unpack_bcif4(const uint8_t* input, uint8_t* output,
 /* Reconstruct one row filtered with `type` from `in` (stride bytes) into the
    output row `cur` (which doubles as the source of already-reconstructed
    left/above-left samples). */
-static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* prev,
-                             uint8_t* cur, size_t stride, unsigned bpp)
+static void rowfilter_decode_n(uint8_t type, const uint8_t* in, const uint8_t* prev,
+                               uint8_t* cur, size_t stride, unsigned bpp)
 {
     size_t i;
     size_t head = (size_t)bpp < stride ? (size_t)bpp : stride;
@@ -242,6 +242,84 @@ static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* pre
         default: /* NONE */
             memcpy(cur, in, stride);
             return;
+    }
+}
+
+
+/* Left-neighbour filters with the pixel stride as a compile-time constant. That
+   turns `cur[i - bpp]` into a fixed offset, so the compiler can unroll a whole
+   pixel per iteration and interleave the BPP independent dependency chains
+   instead of walking one byte at a time.
+
+   Only AVG and PAETH are instantiated, and only for a non-NULL `prev`. Keeping
+   the decoder small matters as much as keeping it fast here, so everything that
+   does not pay for its code size goes through rowfilter_decode_n: NONE and UP do
+   not depend on the pixel width, the first row of an image is one row out of
+   `height`, and SUB accounts for ~6% of the filtered bytes this corpus actually
+   produces, against AVG ~70% and PAETH ~20% (see docs/BENCHMARKS.md). */
+#define PXL_ROWFILTER_DECODE_FIXED(NAME, BPP)                                  \
+static void NAME(uint8_t type, const uint8_t* in, const uint8_t* prev,         \
+                 uint8_t* cur, size_t stride)                                  \
+{                                                                              \
+    size_t i;                                                                  \
+    size_t head = (size_t)(BPP) < stride ? (size_t)(BPP) : stride;             \
+                                                                               \
+    switch (type) {                                                            \
+        case PXL_ROWF_AVG:                                                     \
+            for (i = 0; i < head; ++i)                                         \
+                cur[i] = (uint8_t)(in[i] + (prev[i] >> 1));                    \
+            for (i = head; i < stride; ++i)                                    \
+                cur[i] = (uint8_t)(in[i] +                                     \
+                    (uint8_t)(((int)cur[i - (BPP)] + (int)prev[i]) >> 1));     \
+            return;                                                            \
+        case PXL_ROWF_PAETH:                                                   \
+            for (i = 0; i < head; ++i)                                         \
+                cur[i] = (uint8_t)(in[i] + prev[i]);                           \
+            for (i = head; i < stride; ++i)                                    \
+                cur[i] = (uint8_t)(in[i] +                                     \
+                    pxl_paeth(cur[i - (BPP)], prev[i], prev[i - (BPP)]));      \
+            return;                                                            \
+        default:                                                               \
+            memcpy(cur, in, stride);                                           \
+            return;                                                            \
+    }                                                                          \
+}
+
+PXL_ROWFILTER_DECODE_FIXED(rowfilter_decode_1, 1)
+PXL_ROWFILTER_DECODE_FIXED(rowfilter_decode_2, 2)
+PXL_ROWFILTER_DECODE_FIXED(rowfilter_decode_3, 3)
+PXL_ROWFILTER_DECODE_FIXED(rowfilter_decode_4, 4)
+
+/* Dispatch one row to the specialization matching its pixel width. */
+static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* prev,
+                            uint8_t* cur, size_t stride, unsigned bpp)
+{
+    size_t i;
+
+    if (type == PXL_ROWF_NONE) {
+        memcpy(cur, in, stride);
+        return;
+    }
+    if (type == PXL_ROWF_UP) {
+        if (prev == NULL) {
+            memcpy(cur, in, stride);
+        } else {
+            for (i = 0; i < stride; ++i) {
+                cur[i] = (uint8_t)(in[i] + prev[i]);
+            }
+        }
+        return;
+    }
+    if (prev == NULL || type == PXL_ROWF_SUB) {
+        rowfilter_decode_n(type, in, prev, cur, stride, bpp);
+        return;
+    }
+    switch (bpp) {
+        case 1:  rowfilter_decode_1(type, in, prev, cur, stride); return;
+        case 2:  rowfilter_decode_2(type, in, prev, cur, stride); return;
+        case 3:  rowfilter_decode_3(type, in, prev, cur, stride); return;
+        case 4:  rowfilter_decode_4(type, in, prev, cur, stride); return;
+        default: rowfilter_decode_n(type, in, prev, cur, stride, bpp); return;
     }
 }
 

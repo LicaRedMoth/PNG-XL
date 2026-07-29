@@ -505,3 +505,137 @@ file bigger. Worth a look on its own.
 
 **Decision:** the README claim is narrowed to photographic content rather than
 quietly kept. 1-bit input is a separate weak spot, no work done on it yet.
+
+## 2026-07-29 — what the unfilter specialization cost in decoder size
+
+**Commit:** 2d8d9ec · **Hardware:** Intel Pentium B960 @ 2.20GHz · **Compiler:**
+GCC 16.1.1 · Release, `strip`, `.text` of `bench/mindec_pxl.c` linked against
+`libpxlcore.a` + static `libzstd.a`, **libc dynamic** (the methodology fixed in
+the TU-split entry).
+
+The specialized unfilter loops duplicate code per filter type, and Release moved
+to `-O3`. Both inflate `.text`, so the two factors are separated by rebuilding
+the same source at `-O2`.
+
+| build | `.text` | Δ |
+|---|---:|---:|
+| before specialization, `-O2` (previous entry) | 162 034 B | — |
+| current code, `-O2` | 164 210 B | +2 176 B |
+| **current code, `-O3` (shipping)** | **164 466 B** | **+256 B** |
+
+**Specialization costs 2 176 B, `-O3` costs 256 B, 2 432 B / +1.5% in total** —
+against the 2.5x decode speedup this is the cheapest trade in the project so far.
+
+### Where the 164 KB actually sits
+
+| object | `.text` |
+|---|---:|
+| `pxl_codec_decode.c.o` | 13 553 B |
+| `pxl_codec_common.c.o` | 2 232 B |
+| `pxl_io.c.o` | 413 B |
+| **our code, total** | **16 198 B** |
+| zstd decompressor (remainder) | ~148 268 B |
+
+**90% of the decoder is zstd, 10% is PXL.** Shaving our own code further is
+pointless: even deleting the whole codec would remove a tenth. Decoder size is
+now a question about the zstd build configuration, not about our algorithms.
+
+### Checks
+
+- `nm`: zero `pxl_encode` and zero `ZSTD_compress` symbols — no encoder leaks in.
+- The stripped binary decodes: `258x200 sum=14022381` on
+  `RGB_24bits_palette_color_test_chart.pxl`.
+- **Baseline not re-measured:** there is no static libpng on the system anymore,
+  so the comparison keeps the recorded ~230 127 B (libpng16.a 209 913 +
+  inflate ~20 214). Cross-check: `libpng16.so.16.58.0` has 170 733 B of `.text`,
+  but that is PIC and includes the *encoder*, so it is not directly comparable.
+
+**Result: 164 466 B vs ~230 127 B, 28.5% lighter than a PNG decoder** (was 29.6%
+before specialization). The priority holds.
+
+## 2026-07-29 — where decode time goes, per stage
+
+**Commit:** 2d8d9ec · **Hardware:** Intel Pentium B960 @ 2.20GHz · **Compiler:**
+GCC 16.1.1, `-O3` (confirmed in `flags.make`; no `-march=native`, the binary
+stays portable) · `bench/stages.c`, level 12, 3 repetitions · corpus: every 5th
+PNG of USC-SIPI + Kodak, 47 files.
+
+The goal was the stopping rule agreed earlier: if zstd owns 75-80% of decode,
+unfiltering is not worth optimizing further.
+
+### Attributing each file to the filter the encoder actually picks
+
+Earlier entries measured *forced* filter modes, which is not what ends up in a
+file: the still encoder tries all filters and keeps the smallest. Weighting each
+file by its winning mode gives the honest profile.
+
+| mode | files | zstd | unfilter | total |
+|---|---:|---:|---:|---:|
+| adaptive | 32 | 95.8 ms (52.4%) | 87.0 ms (47.6%) | 182.8 ms |
+| BCIF | 11 | 137.5 ms (86.5%) | 21.5 ms (13.5%) | 159.0 ms |
+| none | 3 | 1.9 ms (95.3%) | 0.1 ms (4.7%) | 2.0 ms |
+| delta | 1 | 0.0 ms (9.0%) | 0.3 ms (90.8%) | 0.4 ms |
+| **all** | **47** | **235.2 ms (68.3%)** | **108.9 ms (31.7%)** | **344.1 ms** |
+
+**The answer is bimodal, and the average hides it.** On BCIF files zstd is 86.5%
+and the stopping rule is already met. On adaptive files unfiltering is 47.6%, and
+adaptive wins 32 of 47 files (68%). Overall zstd is 68.3% — below the 75% line,
+so the remaining headroom is real and it all sits in adaptive unfiltering.
+
+### Which row filter that headroom is made of
+
+`bench/rowstats.c`, same corpus: 26 112 rows, 33 423 360 filtered bytes.
+
+| filter | rows | % rows | bytes | % bytes |
+|---|---:|---:|---:|---:|
+| AVG | 14 699 | 56.3% | 23 531 520 | **70.4%** |
+| PAETH | 8 145 | 31.2% | 6 542 336 | 19.6% |
+| SUB | 1 269 | 4.9% | 2 018 048 | 6.0% |
+| UP | 1 924 | 7.4% | 1 270 272 | 3.8% |
+| NONE | 75 | 0.3% | 61 184 | 0.2% |
+
+Restricted to the 32 adaptive winners (16 896 rows a decoder really unfilters),
+PAETH is 37.2% of rows but only 24.9% of bytes.
+
+**Two earlier claims do not survive this measurement:**
+
+1. A code comment in `pxl_codec_decode.c` read "AVG ~82%, PAETH ~12%". On the
+   widened corpus it is AVG 70.4% / PAETH 19.6% / SUB 6.0%. The comment was
+   written before the corpus grew; it is corrected in place. The conclusion it
+   supported (specialize AVG and PAETH, leave SUB to the generic path) still
+   holds, and SUB at 6% rather than 1% is still not worth the code size.
+2. "BCIF loses everywhere, drop it." It does not. BCIF wins 11 of 47 files, and
+   because those files are the large USC-SIPI images it wins the *summed bytes*
+   on both corpora (USC-SIPI 12.88 MB vs adaptive 19.89 MB; Kodak 2.72 MB vs
+   2.84 MB). Adaptive wins on *file count*, BCIF on *total size*. Both facts are
+   true at once and neither is a bug — the encoder picks correctly per image.
+   **BCIF stays.**
+
+### Why AVG is hard to make faster
+
+AVG reconstruction is `cur[i] = in[i] + ((cur[i-bpp] + prev[i]) >> 1)`. Each byte
+depends on a byte `bpp` positions earlier in the same row, so the row is a serial
+dependency chain. SIMD cannot break it; the most libpng's SSE2 paths do is work
+on `bpp` bytes at once, which the compile-time-constant BPP specialization
+already lets GCC do at `-O3`. An optimistic 1.7x on AVG alone would be ~10% of
+total decode, and it would cost x86 intrinsics in a decoder whose portability
+(PSP has no SSE2) and size are stated priorities.
+
+**Decision: stop optimizing unfiltering.** zstd at 68.3% is close enough to the
+75% line that the remaining win is ~10% of decode for a portability regression.
+Decode is already 2.5x faster than before specialization. The next honest lever
+is the zstd build configuration, which is also 90% of decoder size.
+
+### Reproducing
+
+```sh
+cmake --build build --target pxl_bench_stages pxl_bench_rowstats -j4
+FILES=$(find tests/data/USC-SIPI-Image-Database \
+             tests/data/Kodak-Lossless-True-Color-Image-Suite \
+        -name '*.png' | sort | awk 'NR%5==1')
+./build/pxl_bench_rowstats --quiet -l 12 $FILES
+# per-stage, weighted by the mode the encoder chooses (see the table above):
+# for each file, `pxltool c -l 12` then `pxltool info | grep filter`, and take
+# that mode's row from `pxl_bench_stages <file> 3 12`. Match case-insensitively:
+# info prints "BCIF", stages prints "bcif".
+```
