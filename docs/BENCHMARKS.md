@@ -639,3 +639,91 @@ FILES=$(find tests/data/USC-SIPI-Image-Database \
 # that mode's row from `pxl_bench_stages <file> 3 12`. Match case-insensitively:
 # info prints "BCIF", stages prints "bcif".
 ```
+
+## 2026-07-29 — callgrind: the unfilter loop is compulsory-miss bound, not cache bound
+
+**Commit:** ab0a39e · **Hardware:** Intel Pentium B960 @ 2.20GHz, L1d 32 KiB/core,
+L2 256 KiB/core, L3 2 MiB · **Tools:** valgrind-3.25.1 (callgrind, `--cache-sim=yes`),
+perf 7.1.4 · **Build:** `build-prof`, `-O3 -fno-omit-frame-pointer`.
+
+perf gave the *time* split (zstd 67.5% gray / 59.6% RGB of decode). It could not
+say *why* the remaining third costs what it costs. Callgrind answers that with
+exact counters instead of sampled ones.
+
+### Isolating the unfilter
+
+At 1 repetition, level-12 encoding is ~99% of all instructions, so a whole-run
+profile drowns the decoder. `--toggle-collect=reverse_filter` restricts
+collection to the unfilter pass only:
+
+```sh
+valgrind --tool=callgrind --toggle-collect=reverse_filter --cache-sim=yes \
+  ./build-prof/pxl_bench_stages <file> 3 12
+```
+
+Each run unfilters the same 2.36 MB (stages decodes every candidate mode 3 times,
+so gray = 512×512×1×3 modes×3 reps, RGB = 256×256×3×4 modes×3 reps).
+
+| corpus | Ir/byte | D refs | D1 miss | LL miss | 1 D1 miss per |
+|---|---:|---:|---:|---:|---:|
+| 1.1.08.png, gray 1ch | 3.62 | 1,938,591 | 3.80% | 0.64% | 32.0 B |
+| 4.1.01.png, RGB 3ch | 5.54 | 4,292,832 | 1.72% | 0.29% | 32.0 B |
+
+### The cache is already optimal
+
+One D1 miss per 32 bytes in *both* runs, on a 64-byte line: exactly two lines
+touched per 64 bytes of output (streaming the zstd output in, the pixels out).
+The previous row is never a miss, it was written moments earlier and is still
+resident. These are compulsory misses, the unavoidable cost of reading input
+once and writing output once.
+
+LL misses are `0 rd + 12,289 wr` — every last-level miss is a write-back of
+finished pixels. Nothing the decoder reads ever falls out of L2/L3.
+
+So there is no locality left to win: no blocking, no prefetch, and no row-buffer
+rearrangement can beat two compulsory lines per line of output. The remaining
+third of decode time is ALU and dependency-chain latency, not memory.
+
+### Why SIMD cannot fix the rest
+
+The suggestion to reach for SIMD was checked and rejected on structure, not on
+effort. PAETH, SUB and AVG all read the pixel `bpp` bytes to the left *after*
+it has been reconstructed. That is a serial dependency along the row: lane *n*
+of a vector would need the output of lane *n-1*. For 1-channel images the chain
+is one byte long, the worst possible case, and gray is where the corpus spends
+most of its bytes. libpng's SIMD filter code works around this only by
+processing `bpp` bytes at a time (3 or 4 of 16 lanes used) — it vectorizes the
+*channels*, never the row. That is a fraction of a lane-width, and it does not
+apply to 1ch at all.
+
+`pxl_paeth` is already inline and branchless (arithmetic-shift masks, no jumps),
+so the per-byte work is a handful of dependent integer ops. At 3.62 Ir/byte for
+gray there is not much fat left to trim.
+
+### Compiler flags
+
+`-O3` was already set in `CMakeLists.txt:17` and confirmed in `flags.make`.
+`-Ofast` was rejected: over `-O3` it adds only `-ffast-math` and friends, and
+the codec contains no floating point at all, so it can only add risk.
+
+`-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON` (LTO) was tried for cross-TU inlining
+into zstd, and **rejected: it makes decode slower.** Best-of-5 alternating runs
+of the same binary pair, `adaptive` mode, level 12, 5 reps each:
+
+| file | build | zstd ms | unfilt ms | total ms |
+|---|---|---:|---:|---:|
+| 1.1.08 gray | `-O3` | 0.887 | 0.108 | 0.995 |
+| 1.1.08 gray | `-O3` + LTO | 1.016 | 0.361 | 1.377 (**+38.4%**) |
+| 4.1.01 RGB | `-O3` | 0.923 | 0.352 | 1.275 |
+| 4.1.01 RGB | `-O3` + LTO | 0.963 | 0.497 | 1.460 (**+14.5%**) |
+
+The unfilter is what regresses, 3.3× on gray. That is the signature of LTO
+undoing the specialization: the per-filter unfilter variants are near-identical
+bodies, and the global optimizer is free to merge them back into one generic
+loop with the filter type live in a register, which is exactly the dispatch this
+decoder was written to avoid. Single-run numbers were too noisy to see this
+(the same gray file read 10.3% and 25.7% unfilter on consecutive runs), which is
+why the comparison is best-of-5 and interleaved.
+
+LTO also did not finish linking within 10 minutes at `-j$(nproc)` on the B960.
+`build-lto/` was removed; the default build stays `-O3` without LTO.

@@ -151,6 +151,14 @@ if(PXL_VENDORED)
     target_include_directories(predlab PRIVATE ${PXL_ZSTD_INCLUDE})
 endif()
 
+# Decode-only profiling target. Kept separate from pxl_bench_rawdec so that a
+# profiler sees the decoder alone, without libpng and QOI in the same profile.
+add_executable(pxl_bench_profdec bench/profdec.c)
+target_link_libraries(pxl_bench_profdec PRIVATE pxl_static)
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_profdec PRIVATE ${PXL_ZSTD_INCLUDE})
+endif()
+
 # Pure-decode benchmark (compressed bytes -> pixels): PXL against QOI and
 # libpng. Built only when a vendored qoi.h is present, since it is the baseline.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/qoi/qoi.h")
