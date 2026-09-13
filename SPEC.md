@@ -70,9 +70,10 @@ are only meaningful for indexed and grayscale images, matching PNG.
 - `Version` == 1.
 - `Channels` ∈ {1, 2, 3, 4}.
 - `BitDepth` ∈ {1, 2, 4, 8, 16}; values below 8 require `Channels == 1`.
-- `ColorFilter` ∈ {0, 1, 2, 3}; `1` (BCIF) requires `BitDepth == 8` and
-  `Channels ∈ {3, 4}`. IDs `4..255` are reserved for later revisions and MUST
-  be rejected by this version.
+- `ColorFilter` ∈ {0, 1, 2, 3}; `1` (BCIF) requires `BitDepth == 8`,
+  `Channels ∈ {3, 4}` and `PaletteCount == 0` (BCIF decorrelates color planes,
+  so palette indices are never a valid input). IDs `4..255` are reserved for
+  later revisions and MUST be rejected by this version.
 - `PaletteCount` ≤ 256; if nonzero then `Channels == 1`.
 - `PaletteAlphaCount` ≤ `PaletteCount`.
 - `RowBytes = ceil(Width × Channels × BitDepth / 8)`, and `RowBytes × Height`
@@ -83,6 +84,22 @@ are only meaningful for indexed and grayscale images, matching PNG.
 - The zstd frame decompresses to exactly `RawByteCount` bytes.
 
 If any invariant fails, the file is invalid and MUST be rejected.
+
+Beyond the format invariants, a decoder allocates from header fields before it
+has seen any pixel data, so it MUST also bound the geometry. This
+implementation rejects a header unless:
+
+```
+1 <= Width  <= 1000000
+1 <= Height <= 1000000
+Width × Height <= 2^28
+```
+
+The same two bounds apply to `.apxl` canvas dimensions (§8). These are
+implementation limits, not part of the encoded layout: a decoder MAY raise them,
+and a file above them is well-formed but out of range. The `2^28` pixel cap is
+what makes `Width × Height × PixelBytes` (at most `2^31`) safe to compute as a
+`size_t` on every supported target.
 
 ### 2.3 Palette section
 
@@ -168,6 +185,18 @@ layout, of length `RawByteCount`.
 `PixelBytes` is 1, so filters operate on packed bytes rather than on samples —
 the same rule PNG uses for its `bpp` offset.
 
+Filters see a row as `FilterUnits` units of `PixelBytes` bytes each:
+
+```
+BitDepth >= 8:  FilterUnits = Width      (one unit = one pixel)
+BitDepth <  8:  FilterUnits = RowBytes   (one unit = one packed byte)
+```
+
+Either way `FilterUnits × PixelBytes == RowBytes`, so a filtered row always
+covers exactly one scanline. Sections below say `FilterUnits` where a reader
+might otherwise assume `Width`; the two differ only at sub-8-bit depths, and
+substituting `Width` there would truncate the row.
+
 Filters are applied to the raw pixel buffer to produce a filtered buffer, which
 is then zstd-compressed. All filters except ADAPTIVE preserve the input length. Decoding decompresses first,
 then inverts the filter. The encoder MAY try multiple filters and pick the
@@ -237,8 +266,8 @@ This transform is exactly reversible; it originates from the Zpng project.
 
 Per-row PNG-style filtering. This is the only filter whose output size differs
 from the raw pixels: for each row it emits **one filter-type byte** followed by
-the filtered row of `RowStride = Width × PixelBytes` bytes. Total filtered size
-is `Height × (1 + RowStride)`.
+the filtered row of `RowStride = FilterUnits × PixelBytes == RowBytes` bytes.
+Total filtered size is `Height × (1 + RowBytes)`.
 
 Filtering is byte-wise over the row. For output byte index `i` in a row:
 
@@ -314,6 +343,13 @@ The filtered buffer is compressed into exactly one Zstandard frame (RFC 8878),
 written verbatim as the file's frame region. Any zstd compression level MAY be
 used; it does not affect the decoded result. Decoders MUST accept any valid
 zstd frame that decompresses to `RawByteCount` bytes.
+
+Informative: libpxl trials each candidate filter at the requested level and
+keeps the smallest frame. Candidates are ordered cheapest-to-decode first
+(`NONE`, `DELTA`, `ADAPTIVE`, then `BCIF` when the geometry allows it), and a
+later candidate must be *strictly* smaller to displace an earlier one, so an
+exact size tie resolves in favor of the faster decode. A caller passing
+`zstd_level <= 0` gets `PXL_LEVEL_DEFAULT`, currently `1`.
 
 ---
 
@@ -404,9 +440,11 @@ back-to-back, each `canvas_bytes` long, in the pixel model of section 4.
 
 ### 10.3 Playback / decode
 
-Decompress the single zstd frame into the `RawByteCount` buffer (a decoder
-should raise its zstd window-log limit to match the encoder's, which uses up to
-2^27). Frame `i` is the slice `[i × canvas_bytes, (i+1) × canvas_bytes)`. Each
+Decompress the single zstd frame into the `RawByteCount` buffer. A decoder
+should raise its zstd window-log limit to match the encoder's: libpxl turns on
+long-distance matching with a `windowLog` of 27 (a 128 MiB match window) at
+levels ≥ 10, so that cross-frame redundancy stays reachable, and its own
+decoder allows `windowLog` up to 28. Frame `i` is the slice `[i × canvas_bytes, (i+1) × canvas_bytes)`. Each
 frame is already a full canvas and is bit-exact.
 
 APNG interop (loading an APNG into frames, or writing frames back as APNG) is a

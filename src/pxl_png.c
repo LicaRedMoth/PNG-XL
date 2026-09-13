@@ -144,6 +144,11 @@ pxl_image pxl_load_png(const char* path)
             png_set_tRNS_to_alpha(png);
         }
     }
+    /* Interlaced (Adam7) sources must be de-interlaced, otherwise
+       png_read_image writes only part of each row and the rest of the buffer is
+       left as-is. */
+    png_set_interlace_handling(png);
+
     /* Keep 16-bit big-endian (PNG native): no png_set_swap. */
     png_read_update_info(png, info);
 
@@ -167,7 +172,11 @@ pxl_image pxl_load_png(const char* path)
         png_longjmp(png, 1);
     }
     size = stride * h;
-    img.buffer.data = (unsigned char*)malloc(size ? size : 1);
+    /* calloc, not malloc: for depths below 8 a row is padded to a whole byte and
+       libpng never writes those trailing bits, so malloc would feed heap garbage
+       into the filter and compressor. The pixels decode correctly either way,
+       but the encoded bytes would not be reproducible. */
+    img.buffer.data = (unsigned char*)calloc(size ? size : 1, 1);
     if (!img.buffer.data) { png_longjmp(png, 1); }
 
     rows = (png_bytep*)malloc(sizeof(png_bytep) * h);
