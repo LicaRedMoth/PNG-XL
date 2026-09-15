@@ -136,6 +136,30 @@ the target hardware. Note the ordering lesson: `.text` was tracked for months
 while the figure that actually decides whether a PSP can open a photograph was
 never taken.
 
+**Update 2026-09-15: done for the still path, and it lands where predicted.**
+The filtered side is now consumed through a one-row window in both decode
+paths. Streaming a 3000x3000 photograph fell from 53.2 to 27.6 MiB against
+libpng's 26.9, so the still path reaches the reference footprint and a
+9-megapixel image fits the 32 MB budget. Byte-identical over 372 decodes;
+numbers in [BENCHMARKS.md](BENCHMARKS.md), code in `db07781`.
+
+**What it did not fix, and this is the important half.** BCIF has no row window
+by construction, and BCIF is what the encoder chooses for photographs. A
+default-encoded photo still costs 53 MiB; only `-p` buys the saving, at +4% to
++6.6% in size on large images. The format now has a memory/size dial instead of
+a wall, but it has to be turned on purpose.
+
+**This is now the strongest argument yet against BCIF** — stronger than the size
+and progressiveness arguments in the entry below, which were a matter of taste.
+On the stated target hardware the row-wise path is the only one that runs, and
+BCIF is the single filter that cannot use it. Removing it would make the good
+memory behaviour the default rather than a flag. What that costs on photographic
+size is already measured and is the counter-argument to weigh.
+
+**Still open:** `apxl_decode` is untouched and still peaks at twice the whole
+animation. It is the simpler fix of the two — decode frame by frame instead of
+materialising every frame and then copying each one.
+
 ### The comparison with QOI was stated incorrectly
 **Problem:** it was claimed that PXL beats QOI. Measurement 3 shows the
 opposite: QOI is faster on 24 out of 24 photographs, by roughly 30%.

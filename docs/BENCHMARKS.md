@@ -975,3 +975,69 @@ per frame in `apxl_decode`. This is decoder-side only, byte-identical output,
 no compatibility risk — the same class of change as the TU split that fixed
 decoder size. It is not implemented and not measured; the numbers above are the
 case for doing it.
+
+---
+
+## 2026-09-15 — decode memory after the one-row window
+
+- **Commit:** `db07781` (measured against `d3151dd` as the before)
+- **Method:** as the entry above — peak RSS via `getrusage`, max of 3, minus a
+  1528 KiB empty-program baseline. Confirmed against `valgrind massif`, which
+  is what identified the two 27 MB allocations in the first place.
+
+Peak RSS, net MiB, on the same ladder as before:
+
+| image | pixels | `pxl_decode` before → after | `pxl_stream` before → after | libpng |
+|---|---:|---|---|---:|
+| 768x512 adaptive | 1.1 | 3.7 → 3.3 | 4.0 → 3.0 | 2.2 |
+| 2250x2250 adaptive | 14.5 | 41.5 → **27.6** | 30.8 → **16.2** | 15.6 |
+| 3000x3000 adaptive | 25.7 | 63.6 → **38.6** | 53.2 → **27.6** | 26.9 |
+| 3000x3000 BCIF | 25.7 | 62.8 → 62.8 | 53.4 → 53.3 | 26.9 |
+
+**The streaming path now matches libpng** — 27.6 MiB against 26.9 on a
+3000x3000 photograph, where it needed 53.2 before. At 2250x2250 it is 16.2 MiB
+against 14.5 MiB of pixels, so 1.12x: the output buffer, one row, and zstd's
+window. The 32 MB target now holds a 9-megapixel image; before it did not.
+
+`pxl_decode` lands at 38.6 rather than 27.6 because its API takes the whole
+compressed file as a buffer and the caller keeps it live — that is the 11 MiB
+between the columns, and it is the caller's, not the decoder's.
+
+### The caveat that matters
+
+BCIF is unchanged by design: the plane split completes no row until the last
+plane byte, so there is no row window to unfilter through. **The encoder picks
+BCIF for photographs**, which is exactly the content the target hardware would
+be opening, so on a default-encoded photo none of this helps. Encoding with
+`-p` (progressive, BCIF excluded) is what buys the memory, and on this ladder
+it costs 4.4% to 6.6% in file size:
+
+| image | default | `-p` | cost |
+|---|---:|---:|---:|
+| 768x512 | 600 474 | 807 560 | +34.5% |
+| 2250x2250 | 11 856 214 | 12 325 479 | +4.0% |
+| 3000x3000 | 11 272 276 | 12 013 885 | +6.6% |
+
+So the format now has a real memory/size dial rather than a wall, but the dial
+has to be turned deliberately. This strengthens the standing argument against
+BCIF: on 32 MB hardware the row-wise path is the only one that runs at all,
+and BCIF is the one filter that cannot use it.
+
+### Correctness
+
+Byte-identical output over **372 decodes** — the 186-file committed corpus and
+the same corpus re-encoded with `-p`, each through both the one-shot and the
+streaming path, diffed against binaries built from the previous commit. Filter
+coverage across those runs: 87 none, 56 adaptive, 26 BCIF, 17 delta. `ctest`
+green.
+
+### Found on the way: a heap overflow
+
+Reading the two paths side by side to share their row logic turned up that
+`stream_emit_rows` passed `h.width` to `unpack_delta_row` where the row is
+`filter_width` bytes — smaller than the width for sub-8-bit images. A .pxl
+pairing a sub-8-bit indexed image with DELTA therefore wrote past every row and
+past the buffer on the last one, in the progressive path a viewer uses on
+downloading data. The palette index check hides it unless the palette is fully
+populated. Confirmed under ASAN and fixed separately in `cab6ccf`, ahead of
+this work, so it can be taken on its own.

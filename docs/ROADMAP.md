@@ -26,8 +26,16 @@ only on the previous row, so a bounded ring buffer fed from
 byte-identical output and no format change. Decoder-side only, same risk
 profile as the TU split that fixed decoder size.
 
-Do the still path first and re-measure before touching `apxl_decode`, whose
-double buffering is a separate and simpler fix.
+**Still path done 2026-09-15** (`db07781`): streaming a 3000x3000 photograph
+went 53.2 -> 27.6 MiB against libpng's 26.9, byte-identical over 372 decodes.
+Caveat that outlives the fix: BCIF has no row window and is what the encoder
+picks for photographs, so the saving needs `-p` and costs 4-6.6% in size. That
+makes removing BCIF a live question again rather than a matter of taste — see
+[`RESEARCH.md`](RESEARCH.md).
+
+**Remaining:** `apxl_decode` still peaks at twice the whole animation. It is the
+simpler of the two fixes: decode frame by frame rather than materialising every
+frame and then copying each one out of the concatenated buffer.
 
 ### Done — the README benchmarks are honest again
 
