@@ -68,6 +68,12 @@ if [ "$with_shots" = 1 ] && [ "$update_readme" = 1 ]; then
 fi
 
 LEVEL=${PXL_LEVEL:-12}
+# The tool's own default is level 1 and every published figure used to be level
+# 12, which meant the tables described output nobody actually got. Rather than
+# change the default or bolt a qualifier onto every claim, the table now carries
+# both: the default row and the tuned rows sit next to each other and the reader
+# compares them directly.
+PXL_LEVELS=${PXL_LEVELS:-"1 12"}
 # oxipng -o max costs seconds per file; on a large corpus that is over an hour
 # for one row. The level is therefore selectable, and the row label follows it.
 OXI=${OXIPNG_LEVEL:-max}
@@ -191,8 +197,12 @@ emit() {
 }
 
 if want PXL; then
-    emit "PXL" "lossless, level $LEVEL" \
-        "$(sweep pxl "$pxltool" c %IN% %OUT% -l "$LEVEL")"
+    for lv in $PXL_LEVELS; do
+        note=""
+        [ "$lv" = 1 ] && note=" (pxltool default)"
+        emit "PXL" "lossless, level $lv$note" \
+            "$(sweep pxl "$pxltool" c %IN% %OUT% -l "$lv")"
+    done
 fi
 
 # Each row is wrapped whole. Guarding only the first branch of WebP's if/elif

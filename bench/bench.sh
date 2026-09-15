@@ -94,12 +94,19 @@ push_still() { still_rows+=("$1|$2|$3|$4|$5|$6"); }
 base_size=$(size_of "$IMG_SRC")
 push_still "PNG" "lossless (native)" "-" "-" "$base_size" "100.0%"
 
-# PXL
-enc_ms=$(median_ms "$pxltool" c "$IMG_SRC" out.pxl)
-dec_ms=$(median_ms "$pxltool" d out.pxl dec_pxl.png)
-sz=$(size_of out.pxl)
-[ "$(ae "$IMG_SRC" dec_pxl.png)" = "0" ] || log "WARNING: PXL still-image round-trip is not pixel-identical"
-push_still "PXL" "lossless (native)" "$enc_ms" "$dec_ms" "$sz" "$(pct_of "$sz" "$base_size")"
+# PXL, at the tool's default level and at the tuned ones. Both belong in the
+# table: the default is what anyone gets by typing `pxltool c`, the tuned levels
+# are what the project's claims were measured at, and showing one without the
+# other is how the two drifted apart in the first place.
+for lv in ${PXL_LEVELS:-"1 12"}; do
+    note=""
+    [ "$lv" = 1 ] && note=", level 1 (default)" || note=", level $lv"
+    enc_ms=$(median_ms "$pxltool" c "$IMG_SRC" out.pxl -l "$lv")
+    dec_ms=$(median_ms "$pxltool" d out.pxl dec_pxl.png)
+    sz=$(size_of out.pxl)
+    [ "$(ae "$IMG_SRC" dec_pxl.png)" = "0" ] || log "WARNING: PXL still-image round-trip is not pixel-identical at -l $lv"
+    push_still "PXL" "lossless (native)$note" "$enc_ms" "$dec_ms" "$sz" "$(pct_of "$sz" "$base_size")"
+done
 
 # GIF (palette-limited, see caveat in README)
 if have magick; then
