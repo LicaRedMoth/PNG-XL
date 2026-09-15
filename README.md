@@ -39,14 +39,19 @@ What we honestly do **not** do: chase the world's best compression ratio, add
 features that break top-to-bottom streaming decode, or start V2 before V1 has
 met its own priorities.
 
-Where those priorities currently stand, per the 2026-07-28 measurements
-(see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+Where those priorities currently stand, per the 2026-07-28 and 2026-09-15
+measurements (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
-- Decode speed — **met**: 2.1x faster than libpng into raw pixels. But QOI is
-  still about 30% faster than us, on all 24 files of the corpus.
-- Decoder size — **not met**: 861 KB against 209 KB for libpng+zlib. Our own
-  code is only 19 KB; the rest is libzstd, including the compressor the decoder
-  never needs.
+- Decode speed — **met**: 2.2x faster than libpng into raw pixels. But QOI is
+  still about 22% faster than us, on all 24 files of the corpus.
+- Decoder size — **met**: 174 KB of `.text` against 210 KB for libpng, and that
+  counts all of libzstd statically while libpng's figure excludes the zlib it
+  loads dynamically; counted the same way it is 174 KB against 271 KB. This
+  was 861 KB and the priority was failed until the codec was split into
+  separate encode and decode units, which stopped the linker dragging the
+  compressor into decoding builds. Our own decoder code is 26 KB of that.
+  Note this is binary size, not memory footprint — decode-time RAM against the
+  32 MB target has not been measured.
 - File size — **met on photographs, not in general**: 85.5% of PNG across the
   Kodak photographic corpus, but 97.6% across the wider 396-file corpus. On the
   158 8-bit grayscale USC-SIPI plates we are at 100.3%, i.e. slightly *worse*
