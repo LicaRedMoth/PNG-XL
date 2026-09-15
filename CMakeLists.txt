@@ -207,6 +207,12 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_encstages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# How much of a frame only a displaced copy can reach -- the headroom a MOVE
+# primitive would have over the plain LZ matches APXL already gets from zstd.
+add_executable(pxl_bench_motion bench/motion.c)
+target_link_libraries(pxl_bench_motion PRIVATE pxl)
+target_include_directories(pxl_bench_motion PRIVATE src)
+
 # Which per-row filters the adaptive filter actually picks, over a corpus.
 # Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
 # the row-filter helpers are static.

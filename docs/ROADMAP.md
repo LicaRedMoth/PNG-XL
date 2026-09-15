@@ -57,6 +57,24 @@ either side of 2026-09-15 as incomparable; only sizes carry across.
 
 ## Next
 
+### Corpus gaps, now that the capture folders are known
+
+Personal, gitignored, never to be committed — `tests/data/Screenshots`
+(lossless PNG), `tests/data/Screenrecords` and `tests/data/Nightrecords` (H.264
+MP4). Only aggregate numbers from any of them may reach README.
+
+- **Screenshots is the one to wire into `bench/corpus.sh`**: lossless, and it
+  closes the synthetic-stills gap named below, which is still the only content
+  class the format claims to be good at and has never measured.
+- **Nightrecords** is worth decoding to frames as a *hard* stills corpus: real
+  night footage is sensor-noise-heavy, and noise is the worst case for lossless
+  coding. It would show where the ratio collapses. Caveat: lossy-sourced, so it
+  measures H.264's rendering of noise, not raw sensor output.
+- **Screenrecords** gives a second animation corpus for `.apxl` *size* work,
+  where only Anita exists today. It cannot be used for exact-match questions —
+  see the MOVE entry in [`RESEARCH.md`](RESEARCH.md).
+
+
 ### Decide cross-frame long-distance matching per stream
 
 Currently `.apxl` enables LDM whenever the level is at least `APXL_LDM_MIN_LEVEL`.

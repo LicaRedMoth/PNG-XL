@@ -36,6 +36,42 @@ channels, and these chunks would become invalid.
 
 ## Rejected ideas
 
+### Motion vectors (MOVE) for animation — rejected on measurement
+**Why it was proposed:** video codecs get their compression from COPY, MOVE and
+RESIDUAL, and APXL has no notion of a displaced copy.
+
+**What was already true.** COPY is not missing — zstd's long-distance matching
+over the concatenated frame stream *is* COPY, at byte granularity, and it is
+what earns the 71.7% on `composition`. A naive temporal delta is also already
+rejected: it is in the format header, because subtracting frames turns
+unchanged areas into zeros but changed areas into noise that matches nothing,
+and LZ prefers identical bytes to small numbers. So MOVE was the only genuinely
+absent primitive.
+
+**Result.** `bench/motion.sh` over Anita, 24 shots per pass sampled evenly,
+4 pairs per shot, 16x16 blocks, exact matching, whole-frame search: MOVE reaches
+**0.73% of blocks on sketch, 0.86% on composition, 0.29% on color**, with the
+dominant vector accounting for only 17-21% of those. The instrument was
+validated first — on a pure 12 px scroll it reports 88.17% MOVE at 99.1%
+vector agreement, and on unrelated frames 1.86%. Numbers in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+**Why.** Hand-drawn frames are redrawn, not translated. Motion compensation
+needs content that moves rigidly; a line redrawn by hand matches nothing
+exactly, however small the change looks.
+
+**Decision:** rejected for hand-drawn animation. Do not reopen on reasoning —
+reopen only with a corpus of *translating* content (camera pans, scrolling,
+sprites) captured **losslessly**. H.264 captures cannot answer it: their own
+quantisation destroys exact matches, and a screen recording that should be
+almost pure translation reads 0.05% MOVE against 88.17% for the same content
+as lossless PNG.
+
+**What the measurement pointed at instead:** 44% of composition blocks match
+nowhere in the previous frame. Residual coding, not motion, is where an
+animation's bytes are — and unlike MOVE that is an open question.
+
+
 ### Tiling (splitting into squares) — rejected
 **Why it was proposed:** block processing gives better locality and opens up
 parallelism.

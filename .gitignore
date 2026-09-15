@@ -42,5 +42,10 @@ pxl_interop_tmp.png
 /tests/data/Video_24fps_96f.apng
 /tests/data/Photorealistic_cover.png
 /tests/data/Photorealistic_cover_fs8.png
-# Symlink to a local screenshot folder. Personal content: never commit it.
+# Personal capture folders. Benchmark material only -- never commit any of it.
+# Screenshots is a symlink to a local folder; the other two are real
+# directories that sit inside the tree, so without these rules a plain
+# `git add -A` would stage them.
 /tests/data/Screenshots
+/tests/data/Screenrecords/
+/tests/data/Nightrecords/

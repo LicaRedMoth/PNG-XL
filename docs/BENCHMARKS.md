@@ -1077,3 +1077,81 @@ deeper reason is structural: cross-frame matching means the decoder must keep
 previous frames reachable, and in this design the output buffer *is* that
 window. Bounded memory and cross-frame matching pull against each other; the
 copy was the accidental cost, the retained frames are the real one.
+
+---
+
+## 2026-09-15 — MOVE headroom over what zstd already finds
+
+- **Commit:** `9cdefb0` + `bench/motion.c`, `bench/motion.sh`
+- **Question:** APXL's single zstd stream already expresses COPY — an LZ match
+  *is* "copy these bytes from further back", which is why finished frames
+  compress well across a shot. What it cannot express cheaply is a *displaced*
+  copy, because a moved block is not contiguous in raster order and costs one
+  match per row instead of one vector per block. Is there anything there?
+- **Method:** each frame cut into 16x16 blocks, each classified by exact match
+  against the previous frame — COPY at the same position, FLAT (single colour,
+  excluded: it matches anywhere and no vector would be spent on it), MOVE at
+  some displacement, RESIDUAL nowhere. Search is over the whole previous frame,
+  not a +-N window, so this is an upper bound rather than one search strategy's
+  yield.
+- **Sampling:** 24 shots per pass drawn evenly across the pass's whole sorted
+  shot list (composition has only 18 in total, 17 usable), first 4 consecutive
+  pairs per shot, every shot weighted once.
+
+### The instrument was validated before its result was believed
+
+| control | copy | flat | move | residual | dominant vector |
+|---|---:|---:|---:|---:|---:|
+| pure 12 px scroll of a real screenshot | 7.47% | 4.37% | **88.17%** | 0.00% | **99.1%** |
+| two unrelated screenshots | 18.08% | 11.05% | 1.86% | 69.01% | 3.1% |
+
+On pure translation the tool finds the motion and the vectors agree with each
+other. On unrelated frames it invents almost none. So a low reading below is
+about the content, not about the measurement.
+
+### Anita
+
+| pass | shots | copy | flat | move | residual | dominant vector |
+|---|---:|---:|---:|---:|---:|---:|
+| sketch | 24 | 88.87% | 2.66% | **0.73%** | 7.74% | 18.6% |
+| composition | 17 | 50.95% | 4.14% | **0.86%** | 44.04% | 21.4% |
+| color | 24 | 82.98% | 6.96% | **0.29%** | 9.77% | 17.5% |
+
+**Under 1% of blocks on every pass**, against 88% on the positive control. And
+the vectors do not agree — 17-21% dominant, where the control is 99% — so even
+that fraction would spend most of its gain on coding the vectors.
+
+The reason is in the content, not the codec: hand-drawn frames are *redrawn*,
+not translated. A line is not moved three pixels, it is drawn again slightly
+differently, and nothing matches exactly any more.
+
+**The number that is actually interesting here is RESIDUAL on composition:
+44%.** Nearly half the blocks of a finished frame match nowhere in the previous
+one. That, not motion, is where the bytes of an animation are.
+
+### Why the video captures cannot answer this question
+
+Two local folders of personal H.264 captures were checked as possible MOVE
+material and are unusable for it, which is worth recording so nobody retries:
+
+| source | copy | move | residual |
+|---|---:|---:|---:|
+| synthetic scroll of a screenshot (PNG) | 7.47% | **88.17%** | 0.00% |
+| screen recording of UI/gameplay (H.264) | 12.95% | **0.05%** | 86.89% |
+
+Same kind of content, opposite answer. H.264 already performed motion
+compensation and quantised the residual, so a block that genuinely moved decodes
+to nearly-but-not-exactly the same pixels and no exact match survives. Night
+footage reads move=7.30% but across 2827 distinct vectors with a 0.8% dominant
+share — chance matches in dark regions, not motion.
+
+Answering the MOVE question for screen content needs a **lossless** capture
+(FFV1 or lossless x264, or a PNG frame sequence). The synthetic scroll above
+already gives its ceiling: 88%.
+
+**Decision:** for hand-drawn animation, MOVE is rejected on measurement — the
+headroom is under 1% and incoherent. For translating content it would be worth
+a great deal, but that is a different corpus and arguably a different product;
+the existing rejection bar for block-based work (>5% gain while keeping
+streaming decode, see RESEARCH.md on tiling) is not met by anything measured
+here.
