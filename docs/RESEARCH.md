@@ -240,6 +240,43 @@ already loses to libpng by a factor of four.
 
 ## Open questions and confirmed problems
 
+### Tuning zstd beyond the level — nothing there
+**Why it was proposed:** `pxl_codec_encode.c` calls
+`ZSTD_compress(dst, cap, src, size, level)` with a level and nothing else, and
+the log had no entry for `strategy`, `targetLength`, `minMatch`, `chainLog` or
+the literal modes. A whole parameter space looked unexplored, and unlike a
+dictionary it would cost neither the spec nor the decoder a byte.
+
+**Result: the presets win.** Over filtered streams, the best hand-tuned level-12
+configuration (`strat=btultra2,tlen=256`) reaches 92.7% of level-12 default at
+2.4x the encode time, while plain level 19 reaches 90.2% at 2.7x — smaller and
+barely slower. `mml=3` looked like a free win on one class and turned out to be
+byte-identical on icons and 99.9% on large images. Numbers in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+**Decision: rejected.** zstd's level presets are well chosen for filtered image
+data; there is no configuration off that curve worth carrying. Do not reopen
+without a specific mechanism in mind rather than a parameter sweep.
+
+### The still-image default level is 1, and every published number is level 12
+**Found 2026-09-15 while measuring the level curve.** `PXL_LEVEL_DEFAULT` is 1
+for stills (`src/pxl.h`), 12 for animation. `pxltool c` with no `-l` therefore
+produces output that is 107% of level 12 on icons, 117% on small screenshots and
+**144% on large ones** — while the README, the corpus tables and every research
+entry quote level 12.
+
+The level is a pure encode-time trade: decode throughput measured flat from
+level 1 to 19 (784-857 MB/s, the spread being noise), so a higher default costs
+nothing at read time and nothing in the decoder. Against that, encoding a large
+image goes from 1.11s to 11.97s between level 12 and 19, which is real for a
+batch conversion.
+
+**Open, and it is a product decision rather than a measurement:** either the
+default rises to match what the project claims, or every claim acquires an
+"at `-l 12`" qualifier. The present state — shipping 1 and publishing 12 — is
+the one option that is not defensible.
+
+
 ### Decoder size — priority not met
 **Problem:** the built PXL decoder is 861 KB against 209 KB for libpng+zlib
 (measurement 2). Our own code is only 19 KB, everything else is libzstd, and

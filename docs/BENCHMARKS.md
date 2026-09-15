@@ -1324,3 +1324,61 @@ filter names case-sensitively while `pxltool info` prints BCIF capitalised, so
 every BCIF file — which means every colourful one — was dropped and the sample
 skewed toward flat icons. Fixed; recorded because the bug produced a plausible,
 flattering number rather than an error.
+
+---
+
+## 2026-09-15 — zstd parameters beyond the level, and the level curve itself
+
+- **Method:** over filtered streams dumped by `bench/dumpfiltered`, i.e. exactly
+  what the encoder feeds zstd. Three classes kept separate because they behave
+  differently enough that an average would describe none of them: 120 icons
+  (0.8 MB), 10 small screenshots (2.3 MB), 6 large screenshots (92.8 MB).
+
+### Tuning the parameters does not beat the presets
+
+Small screenshots, all at level 12 unless stated, against level 12 default:
+
+| variant | bytes | vs L12 | encode time |
+|---|---:|---:|---:|
+| L12 default | 96 002 | 100.0% | 1.0x |
+| L12 `strat=btultra2` | 94 124 | 98.0% | 1.1x |
+| L12 `mml=3` | 95 108 | 99.1% | ~1x |
+| L12 `mml=7` | 98 069 | 102.2% | ~1x |
+| L12 `strat=btultra2,tlen=256` | 88 984 | 92.7% | 2.4x |
+| L12 `clog=24` | 96 002 | 100.0% | ~1x |
+| **L19 default** | **86 576** | **90.2%** | 2.7x |
+| L22 `--ultra` | 85 989 | 89.6% | 5.0x |
+
+The best hand-tuned level-12 variant reaches 92.7% at 2.4x time; plain level 19
+reaches 90.2% at 2.7x. **The preset dominates the tuning**, and `mml=3`, which
+looked like a free win on this class, turns out to be byte-identical on icons
+and 99.9% on large images — noise. zstd's levels are well chosen for this data
+and there is nothing left on that table.
+
+### The level curve, which is the real lever
+
+| class | L1 | L6 | L12 | L19 | encode L12 → L19 |
+|---|---:|---:|---:|---:|---|
+| icons (0.8 MB) | 107.1% | 103.1% | 100% | 98.6% | 0.81s → 1.46s |
+| small screenshots | 116.8% | 103.0% | 100% | **90.2%** | 0.19s → 0.73s |
+| large screenshots | 143.9% | 111.1% | 100% | **87.3%** | 1.11s → 11.97s |
+
+### And the level costs nothing at decode
+
+Large screenshots, 92.8 MB of raw stream, three passes:
+
+| level | compressed | decode | raw MB/s |
+|---|---:|---:|---:|
+| 1 | 1 640 204 | 0.12s | 784 |
+| 6 | 1 266 258 | 0.11s | 857 |
+| 12 | 1 139 872 | 0.11s | 831 |
+| 19 | 994 638 | 0.12s | 805 |
+
+**Decode speed is flat across levels** — the spread is noise — so the level is a
+pure encode-time-for-size trade and does not touch the property the format is
+actually sold on.
+
+Which makes the still-image default hard to defend: `PXL_LEVEL_DEFAULT` is **1**,
+and on large content that is 143.9% of level 12 — 44% larger — in exchange for
+encode time that a one-off conversion pays once. Every published figure for this
+format is measured at level 12.
