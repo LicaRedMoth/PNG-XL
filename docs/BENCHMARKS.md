@@ -1298,3 +1298,29 @@ cost the same, so attaching any dictionary is what does it.
 
 Conclusion recorded in RESEARCH.md: worth having as a per-file encoder choice,
 never as a format-wide default.
+
+---
+
+## 2026-09-15 — zstd dictionary on real icons: the promise does not survive
+
+- **Corpus:** 1706 icons from two locally installed themes, deduplicated by
+  content, restricted to 32-64 px — Adwaita (colourful) and HighContrast
+  (monochrome). Not committed; reproduce from `/usr/share/icons`.
+- **Method:** as the previous dictionary entry — train on half, measure on the
+  disjoint half and on the other theme.
+
+| held-out set | no dict | Adwaita-trained | HighContrast-trained | both |
+|---|---:|---:|---:|---:|
+| Adwaita (373) | 649 312 | **99.3%** | 102.6% | 101.1% |
+| HighContrast (480) | 175 364 | 104.0% | **103.3%** | 104.5% |
+
+Against -10.4% on the PNG test suite, real icons give 0.7% at best, and
+HighContrast is made worse by a dictionary trained on itself. PngSuite is
+generated content whose files share byte patterns by construction; hand-drawn
+icons do not.
+
+**A biased first run read 96.6% instead of 99.3%.** `bench/dumpfiltered` matched
+filter names case-sensitively while `pxltool info` prints BCIF capitalised, so
+every BCIF file — which means every colourful one — was dropped and the sample
+skewed toward flat icons. Fixed; recorded because the bug produced a plausible,
+flattering number rather than an error.

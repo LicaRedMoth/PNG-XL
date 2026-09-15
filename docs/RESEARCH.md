@@ -35,7 +35,7 @@ channels, and these chunks would become invalid.
 ---
 
 
-### A zstd dictionary — promising on tiny images, but only if it is opt-in
+### A zstd dictionary — rejected, the promise was a corpus artefact
 **Raised and first measured 2026-09-15.** Never previously considered: the
 research log has no mention of dictionaries, and `pxl_codec_encode.c` calls
 plain `ZSTD_compress(dst, cap, src, size, level)` with a level and nothing else,
@@ -76,7 +76,42 @@ gives -2.1% on small screenshots; a screenshot-trained one gives -2.5% on
 PngSuite and *-4.6% worse than nothing* on screenshots themselves, the training
 set there being too small to build more than a 135-byte dictionary.
 
-**Decision: worth doing, as a per-file choice, not a format-wide one.** The
+**Update, same day: measured on real icons, and it does not work.** The -10.4%
+above is from the PNG test suite, and point 1 of the unknowns below asked
+whether a conformance suite says anything about real icons. It does not.
+
+1706 icons from two locally installed themes, deduplicated by content and cut to
+the 32-64 px sizes the curve above identifies as the sweet spot — Adwaita
+(colourful, LGPL/CC-BY-SA) and HighContrast (monochrome, GPL). Trained on half,
+measured on the held-out half and on the other theme entirely:
+
+| held-out set | no dict | Adwaita-trained | HighContrast-trained | both |
+|---|---:|---:|---:|---:|
+| Adwaita (373) | 649 312 | **99.3%** | 102.6% | 101.1% |
+| HighContrast (480) | 175 364 | 104.0% | **103.3%** | 104.5% |
+
+**Even within one theme the best case is 0.7%**, and HighContrast gets *worse*
+with a dictionary trained on HighContrast. Nothing here justifies a byte of
+spec.
+
+**Why the test suite lied.** PngSuite is generated: colour ramps, gradients and
+the same shapes repeated at different bit depths, so its files share byte
+patterns by construction. That is exactly what dictionary training looks for, so
+it found plenty — and none of it exists between real icons drawn by hand.
+
+**A methodological note worth more than the result.** The first icon run read
+96.6% within-theme, better than the truth of 99.3%, because the dumper matched
+filter names case-sensitively and `pxltool info` prints BCIF capitalised — so
+every BCIF file, which means every colourful one, was silently dropped and the
+set skewed flat. A near-miss worth recording: the bug did not crash anything,
+it just quietly made the answer more flattering.
+
+**Decision: rejected.** A dictionary would have to be printed in SPEC.md to keep
+the format implementable from the spec alone, and it buys at most 0.7% on the
+content it was supposed to be for. Do not reopen without a corpus that is
+neither generated nor a single visual style.
+
+**Superseded — what the earlier conclusion said.** The
 encoder already tries several filters and keeps the smallest output; trying with
 and without the dictionary is the same machinery and the same cost model, and
 the header then records which was used. That keeps the win on the files that

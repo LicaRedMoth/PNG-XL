@@ -23,9 +23,22 @@
 
 #include "../src/pxl_png.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* `pxltool info` prints the filter name capitalised for BCIF and lowercase for
+   the rest, so match without regard to case: taking the name verbatim silently
+   dropped every BCIF file from a corpus once already. */
+static int name_is(const char* a, const char* b)
+{
+    size_t i;
+    for (i = 0; a[i] && b[i]; ++i) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) { return 0; }
+    }
+    return a[i] == b[i];
+}
 
 int main(int argc, char** argv)
 {
@@ -40,10 +53,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "usage: %s <image.png> <out.bin> <delta|bcif|adaptive|none>\n", argv[0]);
         return 2;
     }
-    if      (!strcmp(argv[3], "delta"))    { filter = PXL_FILTER_DELTA; }
-    else if (!strcmp(argv[3], "bcif"))     { filter = PXL_FILTER_BCIF; }
-    else if (!strcmp(argv[3], "adaptive")) { filter = PXL_FILTER_ADAPTIVE; }
-    else if (!strcmp(argv[3], "none"))     { filter = PXL_FILTER_NONE; }
+    if      (name_is(argv[3], "delta"))    { filter = PXL_FILTER_DELTA; }
+    else if (name_is(argv[3], "bcif"))     { filter = PXL_FILTER_BCIF; }
+    else if (name_is(argv[3], "adaptive")) { filter = PXL_FILTER_ADAPTIVE; }
+    else if (name_is(argv[3], "none"))     { filter = PXL_FILTER_NONE; }
     else { fprintf(stderr, "unknown filter '%s'\n", argv[3]); return 2; }
 
     img = pxl_load_png(argv[1]);
