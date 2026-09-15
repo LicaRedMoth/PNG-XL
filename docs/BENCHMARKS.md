@@ -1263,3 +1263,38 @@ on other grounds.
 and would have taken over an hour for one row. `bench/corpus.sh` now takes
 `OXIPNG_LEVEL` and puts the level in the row label so the two cannot be mixed
 up.
+
+---
+
+## 2026-09-15 — zstd dictionary, first measurement
+
+- **Tool:** `bench/dumpfiltered` (new) writes the filtered stream the encoder
+  feeds to zstd, so training material matches what is actually compressed.
+- **Method:** `zstd --train` on one half of a corpus, measured on the disjoint
+  other half, `zstd -12`, sizes summed. A dictionary measured on its own
+  training data would measure nothing.
+
+PNG test suite, 79 files train / 81 held out:
+
+| dictionary | compressed | vs none |
+|---|---:|---:|
+| none | 21 987 | 100.0% |
+| 4 KB | 21 885 | -0.5% |
+| 16 KB | 20 481 | -6.8% |
+| 9.6 KB effective | 19 710 | **-10.4%** |
+
+Cross-class and large-image behaviour, same method:
+
+| test set | no dict | PngSuite-trained | screenshot-trained |
+|---|---:|---:|---:|
+| PngSuite (held out) | 100% | **89.6%** | 97.5% |
+| small screenshots (held out) | 100% | 97.9% | 104.6% |
+| 6 large screenshots | 100% | 109.5% | - |
+
+**The large-image regression is dictionary mode, not dictionary content.** On
+one 7.5 MB filtered stream: plain 219 287 bytes, trained dictionary 226 207
+(103.16%), and 9.6 KB of `/dev/urandom` 225 895 (103.01%). Random and trained
+cost the same, so attaching any dictionary is what does it.
+
+Conclusion recorded in RESEARCH.md: worth having as a per-file encoder choice,
+never as a format-wide default.

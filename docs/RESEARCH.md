@@ -34,6 +34,65 @@ channels, and these chunks would become invalid.
 
 ---
 
+
+### A zstd dictionary — promising on tiny images, but only if it is opt-in
+**Raised and first measured 2026-09-15.** Never previously considered: the
+research log has no mention of dictionaries, and `pxl_codec_encode.c` calls
+plain `ZSTD_compress(dst, cap, src, size, level)` with a level and nothing else,
+so the whole zstd parameter space is unexplored.
+
+**Why it should help.** zstd builds matches from what it has already read. A
+small file has read nothing, so its first kilobytes are almost all literals. A
+trained dictionary is history handed over in advance. Decode cost is nil — the
+dictionary is preloaded history, not work — and the blob costs a few KB against
+a 174 KB decoder.
+
+**Method.** `bench/dumpfiltered` writes the byte stream the encoder actually
+hands to zstd (filtered rows, pre-compression), using the filter the encoder
+really picked for that file. Dictionaries were trained with `zstd --train` on
+one half of a corpus and measured on the other half, disjoint, because a
+dictionary measured on its own training data measures nothing.
+
+**Result on the PNG test suite** (79 files train, 81 held out, `zstd -12`,
+summed):
+
+| dictionary | compressed | vs none |
+|---|---:|---:|
+| none | 21 987 | 100.0% |
+| 4 KB | 21 885 | -0.5% |
+| 16 KB | 20 481 | -6.8% |
+| 9.6 KB (asked for 64-110 KB; the training set could not fill more) | 19 710 | **-10.4%** |
+
+**But it cannot be applied unconditionally, and this is the important half.**
+On large images a dictionary *costs* 3-9%. The cause is not the dictionary's
+content: a 9.6 KB dictionary of `/dev/urandom` costs the same as the trained one
+(103.01% against 103.16% on the same file), so **it is dictionary mode itself**,
+not what is in the dictionary. Per-file variance is wide even where the average
+wins — one tiny file went to 114.7% with the trained dictionary while the set
+averaged -10.4%.
+
+**Transfer between content classes is weak.** A PngSuite-trained dictionary
+gives -2.1% on small screenshots; a screenshot-trained one gives -2.5% on
+PngSuite and *-4.6% worse than nothing* on screenshots themselves, the training
+set there being too small to build more than a 135-byte dictionary.
+
+**Decision: worth doing, as a per-file choice, not a format-wide one.** The
+encoder already tries several filters and keeps the smallest output; trying with
+and without the dictionary is the same machinery and the same cost model, and
+the header then records which was used. That keeps the win on the files that
+want it and the loss off every file that does not.
+
+**What is not yet known, and would decide how much this is really worth:**
+1. Whether it generalises. PngSuite is a conformance suite — tiny, synthetic and
+   homogeneous — and the weak cross-class transfer above says a dictionary
+   trained on it may do little for real icons and sprites. A corpus of small
+   real-world images is needed before believing the -10.4%.
+2. What fraction of a realistic workload is small enough to benefit at all. On
+   the 838-file synthetic corpus only 20 files are under 0.12 Mpx.
+3. Whether dictionary mode's cost on large inputs can be avoided rather than
+   dodged — it may be an artefact of how the CLI attaches dictionaries, and the
+   library API may behave differently.
+
 ## Rejected ideas
 
 ### Motion vectors (MOVE) for animation — rejected on measurement

@@ -207,6 +207,23 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_encstages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Dumps the filtered stream the encoder feeds to zstd, so a dictionary can be
+# trained on the right material. Includes pxl_codec_encode.c directly because
+# apply_filter is static, same as pxl_bench_stages.
+add_executable(pxl_bench_dumpfiltered bench/dumpfiltered.c
+                                      src/pxl_codec_common.c
+                                      src/pxl_png.c
+                                      src/pxl_pngio.c
+                                      src/pxl_meta.c
+                                      src/pxl_io.c)
+target_include_directories(pxl_bench_dumpfiltered PRIVATE src)
+target_link_libraries(pxl_bench_dumpfiltered PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_dumpfiltered PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_dumpfiltered PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 # How much of a frame only a displaced copy can reach -- the headroom a MOVE
 # primitive would have over the plain LZ matches APXL already gets from zstd.
 add_executable(pxl_bench_motion bench/motion.c)
