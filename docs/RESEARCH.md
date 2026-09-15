@@ -73,6 +73,32 @@ question of either zstd build options or the choice of compressor.
 little-endian system without fast floating point) decoder size is not
 cosmetic.
 
+**Update 2026-09-15: measured again, the priority is met.** Both of the "what to
+do next" items had already landed — the zstd build options and the codec TU
+split in `2d8d9ec` — and nobody re-ran measurement 2 for seven weeks. Repeating
+it exactly gives **174 066** bytes of `.text` against libpng's 209 913, so the
+decoder is 17% *smaller* than libpng, or 36% smaller if zlib is counted on
+libpng's side the way libzstd is counted on ours. Numbers and verification in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+The 861 KB was never a property of the format, only of the linker being unable
+to split an object file. Two figures quoted above are now wrong and superseded:
+the "285 KB floor for any zstd-based variant" is **147 570** once legacy support
+and multithreading are off, and "our own code is 19 KB" is now 26 496 bytes,
+the loop specialization having cost about 7 KB of text for its 2.5x.
+
+**What this unblocks.** Every deferred decision that was waiting on decoder size
+is now free of that constraint: removing BCIF no longer has a size motive (it
+never did, per the entry below), restricting the filter set has no size motive,
+and "V2 in any form — deferred" loses the reason it was frozen for, since it was
+frozen until the decoder-size goal was met. Those decisions still need their own
+measurements; they just no longer need this one.
+
+**What is still unmeasured:** size is not footprint. The PSP-class target is a
+32 MB RAM budget and nothing here measures decode-time memory — zstd's window
+plus a full-image pixel buffer. That, not `.text`, is now the open question for
+the target hardware.
+
 ### The comparison with QOI was stated incorrectly
 **Problem:** it was claimed that PXL beats QOI. Measurement 3 shows the
 opposite: QOI is faster on 24 out of 24 photographs, by roughly 30%.

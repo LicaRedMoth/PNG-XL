@@ -833,3 +833,53 @@ load-average floor near 1.0, so the 1.5 limit is tight rather than generous:
 expect to wait 70-90 seconds after any build before the guard will let a
 publishing run through, and expect even a no-op `cmake --build` to push it back
 over the line.
+
+---
+
+## 2026-09-15 — decoder size, re-measured after the TU split
+
+- **Commit:** `dcfbec4`
+- **Hardware / compiler:** Intel Pentium B960, gcc 16.2.1, Release
+- **Method:** measurement 2 repeated exactly — minimal decoding programs
+  (file into memory → pixels, no CLI, no metadata), project libraries linked
+  statically, `strip`, compare `.text`. Sizes, so machine load is irrelevant.
+
+Measurement 2 (2026-07-28) recorded the decoder at **861 170** bytes against
+libpng's 209 337 and called the decoder-size priority "not met, and that has to
+be recorded honestly". Two things landed since and were never re-measured: the
+zstd build options (`ZSTD_LEGACY_SUPPORT` / `ZSTD_MULTITHREAD` off,
+`CMakeLists.txt:51`) and the codec TU split in `2d8d9ec`, which was named as
+the next step and then done seven weeks ago.
+
+| binary | `.text`, bytes | vs 2026-07-28 |
+|---|---:|---|
+| empty program (baseline) | 265 | 281 |
+| `ZSTD_decompress` only | 147 570 | 284 978 |
+| **PXL decoder** | **174 066** | 861 170 (**-79.8%**) |
+| libpng decoder (zlib dynamic, not counted) | 209 913 | 209 337 |
+
+**The priority is met.** The PXL decoder is now 17% smaller than libpng's, and
+the old figure was never a property of the format — it was the compressor being
+dragged in by the linker. Verified rather than assumed: the stripped binary
+decodes the test chart correctly (258x200), and `nm` shows `ZSTD_decompress`
+and `pxl_decode` present with `ZSTD_compress`, `ZSTD_compressBound` and
+`pxl_encode_ex` all absent.
+
+Two corrections to figures that are now wrong elsewhere in this log:
+
+- The "285 KB floor for any zstd-based variant" was measured against a libzstd
+  built with legacy support and multithreading. With both off the floor is
+  **147 570**, which is below libpng on its own.
+- Our own decoder code is **26 496** bytes (174 066 - 147 570), up from the
+  19 KB recorded earlier. The unfilter loop specialization in `2d8d9ec` bought
+  its ~2.5x with about 7 KB of text, which is a trade worth knowing about.
+
+The comparison is conservative against us. PXL links all of libzstd statically
+and every byte is counted; libpng's 209 913 excludes zlib, which it loads
+dynamically and which carries another 61 528 bytes of `.text`. Counted the same
+way, libpng + zlib is 271 441 against our 174 066 — 36% smaller, not 17%.
+
+**Caveat on the target hardware.** This says the decoder fits, not that it runs.
+Nothing here measures RAM at decode time, and the PSP-class target is a 32 MB
+budget; zstd's window and the full-image pixel buffer are the figures that
+matter there, and neither has been measured yet.
