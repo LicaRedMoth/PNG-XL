@@ -1215,3 +1215,51 @@ changes that; what changes is the distance.
 1-minute load average of 2.68, above the 1.5 limit `bench/bench.sh` enforces,
 because the sizes were the question and sizes do not care about load. The
 timings in that run are inflated and were not recorded here.
+
+---
+
+## 2026-09-15 — a committed synthetic corpus, and why it needs two numbers
+
+- **Corpus:** 838 freely-licensed UI screenshots fetched by
+  `bench/synthetic_png.sh` from Wikimedia Commons (MediaWiki, Firefox,
+  Wikipedia, Inkscape, browsers, Emacs). 260 MB, gitignored like USC-SIPI —
+  the script is committed, the data is not. Licences: 662 CC BY-SA 4.0,
+  67 CC BY-SA 3.0, 44 CC0, 26 public domain, 22 GPL, the rest CC BY / MIT /
+  LGPL, recorded per file with author and sha256 in `MANIFEST.tsv`.
+- **Reproduce:** `bench/synthetic_png.sh` then
+  `CORPUS_ONLY=tests/data/Synthetic-Screenshots CORPUS_ROWS="PXL oxipng" OXIPNG_LEVEL=2 bench/corpus.sh`
+- 824 of 838 files encoded; the rest are 0-byte or malformed uploads.
+- The corpus is genuinely synthetic, not photographs in PNG clothing: median
+  **1046 unique colours per megapixel**, where photographs run past 100 000.
+
+| Format | Files | Total bytes | % of source PNG |
+|---|---:|---:|---:|
+| PXL, level 12 | 824 | 151 970 262 | **57.9%** |
+| PNG (oxipng -o 2) | 824 | 178 617 956 | **68.1%** |
+
+### Both numbers, because either alone misleads
+
+**57.9% is real but flattering.** Commons uploads come from hundreds of unknown
+tools, so "the source PNG" is not a defined baseline here: `oxipng -o 2` alone
+takes the same files to 68.1%, meaning roughly a quarter of the apparent win is
+slack in other people's export settings rather than compression. A 60-file
+sample said the same before the full run (75.3% for oxipng, 86.2% for PXL
+against it), so this is not a sampling artefact.
+
+**Against a competently encoded PNG, PXL is 85.0%** (57.9 / 68.1). That is the
+figure to quote when the question is "how good is the compression", and 57.9%
+is the figure to quote when the question is "what happens if I convert the PNGs
+I actually find in the wild". Neither is wrong; quoting one without the other
+is.
+
+Re-encoding the corpus to normalise the baseline was tried and rejected:
+ImageMagick drops a fully opaque alpha channel, turning RGBA files into RGB, and
+a screenshot corpus that has lost its alpha channels is no longer the content
+being modelled. Pixels were verified unchanged (AE=0) before that was ruled out
+on other grounds.
+
+**Not comparable to the personal-screenshot run above**, which used
+`oxipng -o max`; this one uses `-o 2` because `-o max` costs seconds per file
+and would have taken over an hour for one row. `bench/corpus.sh` now takes
+`OXIPNG_LEVEL` and puts the level in the row label so the two cannot be mixed
+up.

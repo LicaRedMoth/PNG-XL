@@ -9,6 +9,10 @@
 #                                   # <!-- CORPUS:BEGIN --> / CORPUS:END markers
 #   bench/corpus.sh --with-usc      # also sweep the USC-SIPI corpus (210 more
 #                                   # files, not committed; see bench/usc_png.sh)
+#   CORPUS_ROWS="PXL JXL" bench/...  # only these rows. A full sweep runs five
+#                                   # encoders over every file and oxipng -o max
+#                                   # alone costs seconds per file, so answering
+#                                   # one question should not cost an hour.
 #   bench/corpus.sh --with-shots    # also sweep tests/data/Screenshots: real
 #                                   # desktop screenshots, the synthetic
 #                                   # non-photographic stills the other corpora
@@ -64,6 +68,16 @@ if [ "$with_shots" = 1 ] && [ "$update_readme" = 1 ]; then
 fi
 
 LEVEL=${PXL_LEVEL:-12}
+# oxipng -o max costs seconds per file; on a large corpus that is over an hour
+# for one row. The level is therefore selectable, and the row label follows it.
+OXI=${OXIPNG_LEVEL:-max}
+
+# Row selection. Empty means all of them.
+rows_wanted=${CORPUS_ROWS:-}
+want() {
+    [ -z "$rows_wanted" ] && return 0
+    case " $rows_wanted " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
@@ -176,35 +190,48 @@ emit() {
              'BEGIN{printf "%.1f%%|%.1f", 100*a/b, m/n}')"
 }
 
-emit "PXL" "lossless, level $LEVEL" \
-    "$(sweep pxl "$pxltool" c %IN% %OUT% -l "$LEVEL")"
-
-if have cjxl; then
-    emit "JXL" "lossless, effort 7/10" "$(sweep jxl cjxl -d 0 %IN% %OUT% --num_threads=0)"
-else
-    log "WARNING: cjxl not found, skipping JXL row"
+if want PXL; then
+    emit "PXL" "lossless, level $LEVEL" \
+        "$(sweep pxl "$pxltool" c %IN% %OUT% -l "$LEVEL")"
 fi
 
-if have cwebp; then
-    emit "WebP" "lossless (-lossless)" "$(sweep webp cwebp -lossless -quiet %IN% -o %OUT%)"
-elif have ffmpeg; then
-    emit "WebP" "lossless (-lossless 1)" \
-        "$(sweep webp ffmpeg -y -v error -i %IN% -c:v libwebp -lossless 1 %OUT%)"
-else
-    log "WARNING: neither cwebp nor ffmpeg found, skipping WebP row"
+# Each row is wrapped whole. Guarding only the first branch of WebP's if/elif
+# chain let an unrequested row fall through to the ffmpeg fallback and run
+# anyway -- the slowest encoder here, for a row nobody asked for.
+if want JXL; then
+    if have cjxl; then
+        emit "JXL" "lossless, effort 7/10" "$(sweep jxl cjxl -d 0 %IN% %OUT% --num_threads=0)"
+    else
+        log "WARNING: cjxl not found, skipping JXL row"
+    fi
 fi
 
-if have avifenc; then
-    emit "AVIF" "lossless, speed 6/10 (-l)" "$(sweep avif avifenc -l -o %OUT% %IN%)"
-else
-    log "WARNING: avifenc not found, skipping AVIF row"
+if want WebP; then
+    if have cwebp; then
+        emit "WebP" "lossless (-lossless)" "$(sweep webp cwebp -lossless -quiet %IN% -o %OUT%)"
+    elif have ffmpeg; then
+        emit "WebP" "lossless (-lossless 1)" \
+            "$(sweep webp ffmpeg -y -v error -i %IN% -c:v libwebp -lossless 1 %OUT%)"
+    else
+        log "WARNING: neither cwebp nor ffmpeg found, skipping WebP row"
+    fi
 fi
 
-if have oxipng; then
-    emit "PNG (oxipng -o max)" "lossless recompress" \
-        "$(sweep png oxipng -o max --quiet --out %OUT% %IN%)"
-else
-    log "WARNING: oxipng not found, skipping PNG-recompress row"
+if want AVIF; then
+    if have avifenc; then
+        emit "AVIF" "lossless, speed 6/10 (-l)" "$(sweep avif avifenc -l -o %OUT% %IN%)"
+    else
+        log "WARNING: avifenc not found, skipping AVIF row"
+    fi
+fi
+
+if want oxipng; then
+    if have oxipng; then
+        emit "PNG (oxipng -o $OXI)" "lossless recompress" \
+            "$(sweep png oxipng -o "$OXI" --quiet --out %OUT% %IN%)"
+    else
+        log "WARNING: oxipng not found, skipping PNG-recompress row"
+    fi
 fi
 
 # --- render ------------------------------------------------------------------

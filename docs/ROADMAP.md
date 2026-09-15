@@ -57,6 +57,49 @@ either side of 2026-09-15 as incomparable; only sizes carry across.
 
 ## Next
 
+### Measure decode on the target hardware
+
+Everything claimed about the PSP-class target so far is arithmetic, not
+measurement. The decoder fits in flash (174 KB of `.text`) and the still path
+now decodes in roughly the size of its output, but **no number in this project
+was ever taken on the hardware it is aimed at**, and throughput is the one
+figure that cannot be derived from the x86 runs.
+
+What to measure, on the console: decode throughput in MB/s at both 222 and
+333 MHz, for a 480x272 RGBA8888 screen (522 KB) and a 512x512 texture (1 MB),
+split by filter. The split matters because the filters differ enormously here —
+with NONE, zstd decompresses straight into the destination and there is no
+unfilter pass at all, while ADAPTIVE costs a Paeth pass per row on a CPU with no
+SIMD and a small cache. Peak memory does *not* need the console: it is
+deterministic and already known (output buffer + one row + zstd's window).
+
+**On testing with a PSP-3000 rather than a 1000.** The CPU is identical — same
+Allegrex, same clocks — so throughput transfers exactly, and throughput is the
+unknown. Only the memory ceiling differs, and that is neutralised by allocating
+ballast at startup so the app runs inside a fat-sized budget. The test must
+print the free memory it saw and the budget it enforced, the same way
+`bench/bench.sh` prints the load average it ran under: a measurement that does
+not state its conditions is the failure mode this project has already been
+burned by twice.
+
+Two things that would follow a good result, both already half-built:
+
+- **Decode straight into a GPU texture.** The row window added for the memory
+  work writes each row into the caller's buffer as it lands, so an output-format
+  parameter (RGBA8888 / 5650 / 5551 / 4444) folds the conversion into that write
+  rather than adding a pass. Swizzled output needs an 8-row window instead of a
+  1-row one, which is a constant, not a redesign.
+- **Indexed mode maps onto the hardware.** The GE reads 4- and 8-bit palettised
+  textures with a CLUT natively, and `.pxl` already stores indices packed with
+  the palette in its own section, so an indexed file needs no expansion to RGBA
+  at all. For UI art that is a quarter of the memory and the bus traffic.
+
+Note BCIF is excluded from all of the above: its plane split completes no row
+until the last byte, so it cannot stream into a texture. That is now the third
+independent argument against it, after size on the wider corpus and the memory
+result — see [`RESEARCH.md`](RESEARCH.md).
+
+
 ### Corpus gaps, now that the capture folders are known
 
 Personal, gitignored, never to be committed — `tests/data/Screenshots`

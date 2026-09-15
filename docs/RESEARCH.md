@@ -205,6 +205,57 @@ files are slightly larger than the originals.
 **Decision:** fix the wording in the README to be honest. Catching up with QOI
 on speed while keeping compression is an open task, not a stated fact.
 
+### Removing *adaptive* rather than BCIF — hypothesis, not yet measured
+**Raised 2026-09-15.** Every discussion of trimming the filter set so far has
+been about BCIF. Re-reading the 2026-07-26 stage numbers below with the target
+hardware in mind suggests the wrong filter may have been on trial.
+
+Those numbers, on a 3000x3000 RGB photograph:
+
+| filter | bytes | unfiltering |
+|---|---:|---:|
+| bcif | 11 458 339 | 20.9 ms |
+| adaptive | 11 550 315 | **405.7 ms** |
+| delta | 12 198 006 | 19.9 ms |
+
+**Adaptive is dominated on both axes by BCIF here** — very slightly larger and
+twenty times slower — and it is beaten on speed by delta too, for 5.3% of size.
+The entry below reads as "BCIF is 20x faster than adaptive", but the comparison
+that matters for a small decoder is the other one: *delta is as fast as BCIF and
+streams*, so BCIF's real price is 6% of size against delta, and adaptive's real
+price is 405 ms against delta's 20.
+
+**Why this matters more than it used to.** The cost of adaptive is Paeth: three
+data-dependent comparisons per byte, on 91% of unfiltered bytes, which the
+branch predictor cannot guess. The loop-specialisation attempt recovered only
+16-26% of it and was accepted as "the goal is not met". On the PSP-class target
+— MIPS at 222-333 MHz, no SIMD, small cache — that cost does not stay at 20x,
+it grows, and 405 ms on a desktop is not a promising starting point.
+
+**What argues against removing it, and these are not small.** Adaptive is the
+only filter available for grayscale, since BCIF requires 8-bit RGB/RGBA with no
+palette; it is the only predictor beyond a left delta for indexed and sub-8-bit
+images; it is chosen for 56 of the 186 committed corpus files; and it is listed
+above under *Accepted decisions* as the format's main path. Removing it would
+leave grayscale and palette content with nothing but NONE and DELTA, and the
+README already records grayscale at 100.3% of PNG — slightly *worse* than PNG —
+so there is no headroom to give away there.
+
+**What would have to be measured before this is anything but a hypothesis:**
+1. Corpus size cost with adaptive excluded, split by content class — photographs,
+   synthetic stills, grayscale, indexed. `predlab` already compares filter
+   variants per file, so this needs no new tooling.
+2. Paeth throughput on the actual target (see ROADMAP). If adaptive is merely
+   slow there it is a tradeoff; if it is unusable it decides the question.
+3. What the encoder would pick instead on the 56 files where it currently picks
+   adaptive, and what that costs each of them.
+
+**Status: open, and deliberately not acted on.** This contradicts an accepted
+decision, so it needs better evidence than a re-reading of one photograph's
+numbers. Recorded now so the idea is not lost and so nobody re-derives it from
+scratch — and so the BCIF discussion below is read with the knowledge that
+adaptive, not BCIF, is the filter that costs twenty times the rest.
+
 ### BCIF loses almost everywhere
 **Problem:** `bcif-current` gives 88.15% of PNG, while plain `sub-med` gives
 84.57% (measurement 1). On top of that BCIF is the only filter that breaks

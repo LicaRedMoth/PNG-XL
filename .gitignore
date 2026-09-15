@@ -31,6 +31,10 @@ pxl_interop_tmp.png
 /tests/data/Kodak-Lossless-True-Color-Image-Suite/
 /tests/data/The-official-test-suite-for-PNG/
 /tests/data/USC-SIPI-Image-Database/
+# Freely-licensed UI screenshots from Wikimedia Commons, fetched by
+# bench/synthetic_png.sh. Not committed for the same reason USC-SIPI is not:
+# the script reproduces it, and a few hundred megabytes do not belong in git.
+/tests/data/Synthetic-Screenshots/
 # CLIC 2020 mobile training split: 1048 high-resolution photographs, 3.8 GB.
 /tests/data/CLIC-2020-mobile-train/
 # Anita: an industrial animation dataset. 16871 PNG frames in 367 shots, 11 GB.
