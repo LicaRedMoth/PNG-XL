@@ -208,3 +208,139 @@ re-measure. This is purely mechanical work, the format is not affected, so there
 are no compatibility risks; the difficulty is in the shared `static` helpers,
 which will have to be moved into a third file.
 **Status:** the legacy fix is accepted and in the tree, the TU split is the next step.
+
+### Filter probing on slices instead of the whole frame — rejected
+
+**Why it was proposed:** the encoder tries every filter over the full frame, so
+probing is the dominant cost. Estimating each filter on a few horizontal slices
+should pick the same winner for a fraction of the work.
+
+**Result:** it fixed the synthetic cases it was written for and made real
+photographs worse: **+371 KB over 9 photos**, worst case `texmos2.p512` at
+**+33%**. A slice is not representative of a texture — local statistics elect a
+filter that loses over the full frame.
+
+**Decision:** rejected, the experiment is reverted out of the tree. The cure was
+worse than the disease. Do not reopen as a pure sampling trick; if encode probing
+is attacked again it has to be by making the probe cheaper, not by making it see
+less of the image.
+
+### Reusing one `ZSTD_CCtx` across probes — rejected
+
+**Why it was proposed:** the previous entry named it as the promising mechanical
+follow-up. `pxl_codec_encode.c` calls one-shot `ZSTD_compress` per probe, while
+`apxl_codec.c` already reuses a context. Reuse cannot change the output bytes,
+only the time, so the risk profile looked like the opposite of slice probing.
+
+**Result:** it is slower, not faster. Measured with `perf stat -e instructions:u`
+on Kodak `01/10/19.png` against the unmodified build:
+
+| level | reused `ZSTD_CCtx` vs one-shot |
+|-------|-------------------------------|
+| L1    | +1.2% … +1.3% |
+| L6    | +0.38% … +0.41% |
+| L12   | -0.04% … +0.05% (noise) |
+
+Two variants were tried. `ZSTD_compress2` with the level set once via
+`ZSTD_CCtx_setParameter` cost ~1.5M extra instructions per candidate;
+`ZSTD_CCtx_setPledgedSrcSize` did not recover any of it. `ZSTD_compressCCtx`,
+which takes the level directly and skips the advanced-parameter path, was
+cheaper but still a net loss at every level.
+
+**Why:** one-shot `ZSTD_compress` sizes its workspace to the exact input, so the
+match tables it clears are only as large as the buffer at hand. A reused context
+keeps the largest workspace any prior candidate needed and re-clears all of it on
+every call. Clearing those tables costs more than the allocation the reuse saves,
+and the effect is strongest at low levels where compression itself is cheap.
+The saving is real in `apxl_codec.c` only because frames there are uniform in
+size and the context is reused across a long sequence, not 3-4 candidates.
+
+**Decision:** rejected, reverted, output verified bit-identical to baseline and
+`ctest` green. Encode probing cost is dominated by zstd itself, not by
+per-candidate setup; there is no mechanical win left here. Reducing the candidate
+count on evidence is the only remaining lever, and that trades size for speed.
+
+### The gray + `tRNS` round-trip "bug" did not exist — retracted
+
+**Why it was recorded:** comparing decoded output against PIL reported pixel
+mismatches on `tbbn0g04` and `tbwn0g16`, which looked like the codec mishandling
+transparency on grayscale.
+
+**Result:** the oracle was wrong, not the codec. PIL's `convert('RGBA')` ignores
+the `tRNS` chunk for `L` and `I;16` images, so transparent source pixels were
+being compared against opaque ones. Checked independently with
+`magick compare -metric AE`: **0** on both files, the round trip is bit-exact.
+
+**Decision:** retracted, no decoder change needed. The lasting lesson is about
+tooling: PIL is not a trustworthy oracle for palette or grayscale-with-alpha
+PNGs. If the suite is extended over PngSuite, compare via ImageMagick AE or
+against decoded RGBA bytes directly, otherwise we will collect more phantom bugs.
+
+### Animation: cross-frame coding splits the corpus in two
+
+**Why it was measured:** the Anita industrial animation dataset (16871 frames in
+367 shots, 11 GB) is the first corpus of real hand-drawn animation available to
+us. Every shot ships three passes — `sketch`, `composition`, `color` — so it
+separates line art from finished frames.
+
+**Result:** still-image ratios against the source PNGs at `-l 12`, sampling the
+first frame of each of the first 24 shots per pass (one frame per shot, so a
+single long shot cannot dominate): `color` **34.2%**, `sketch` **44.3%**,
+`composition` **61.5%** (the last over 18 shots — the remaining ones have no
+frame at that index). The encoder picks BCIF on `sketch` and `none` on
+`composition`/`color`, so those finished frames are stored essentially verbatim
+before zstd.
+
+A caveat that matters more than the numbers: an earlier pass over "the first 24
+frames" rather than one frame per shot put `sketch` at 56.7% and `composition` at
+75.4%. Same corpus, same encoder, ~12 points of spread purely from frame
+selection, because consecutive frames of one shot are near-duplicates and the
+sample collapses onto whatever that shot looks like. Treat any single-digit
+comparison over this dataset as noise unless the sampling is stated, and prefer
+per-shot aggregation.
+
+The cross-frame result is the interesting one. Concatenating 16 raw RGBA frames
+of one shot and compressing with `--long=27`, against compressing each frame
+independently: `composition` gains **71.7%**, `sketch` **loses 2.3%**. The real
+`.apxl` path agrees on the first half — 16 composition frames encode to 68.1% of
+the APNG. Consecutive finished frames are nearly duplicates and long-distance
+matching finds them; consecutive line-art frames share almost nothing, and the
+larger window only costs bookkeeping.
+
+**Decision:** open. It argues that cross-frame long-distance matching should be a
+measured decision per stream rather than a flag tied to level >= 10, since on
+line art it is a small net loss. Not acted on yet: this is 16-frame evidence from
+two shots, and the threshold must come from a sweep over the corpus, not from
+these numbers.
+
+### The corpora do not cover the content the format is aimed at
+
+**Observation, not a measurement.** Taking stock of what is available locally:
+Kodak (24 photographs), the PNG test suite, CLIC 2020 mobile train (1048
+photographs, 3.8 GB) and Anita (hand-drawn animation, 11 GB). Three of the four
+are photographic; the fourth is animation.
+
+Nothing covers synthetic non-photographic stills — UI screenshots, diagrams,
+rendered text, charts. That is the content a PNG replacement actually gets
+pointed at, and where the README's own claims are strongest, so it is the one
+gap where a regression could go unnoticed indefinitely. Note the direction of the
+bias: photographs are where PXL is *weakest* (on aerials and textures zstd's edge
+over DEFLATE nearly vanishes), so the current corpora understate the format while
+leaving its strong case unverified.
+
+Adding CLIC to the corpus table is cheap and worth doing, but it deepens the
+existing bias rather than fixing it.
+
+### The README benchmark tables are stale
+
+**Observation.** The still-image and animation tables were generated before the
+filter work and have not been regenerated, so the committed numbers do not
+describe the current encoder. They are reproducible — `bench/bench.sh
+--update-readme` and `bench/corpus.sh` splice between marker comments — so this
+is bookkeeping, not research.
+
+One structural point while regenerating: the still-image decode column times
+`pxltool d`, which writes a PNG on the way out, so a large part of what it
+reports is libpng's deflate rather than PXL's decoder. The README explains this
+in prose underneath, which is the wrong fix — `bench/rawdec` already measures
+decode without the re-encode and should be the primary number.

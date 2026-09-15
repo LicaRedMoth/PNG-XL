@@ -8,6 +8,13 @@ to keep one "current" number.
 Entry format: date, commit, hardware, what was measured, with what, result.
 If a measurement is not reproducible (no tool, different hardware) — say so.
 
+**Measure on an idle machine.** A parallel build in the background inflates
+every timing by 2-3x, uniformly enough that the numbers still look plausible
+and the ratios still roughly hold, so there is nothing in the output to catch
+the mistake later. `bench/bench.sh` refuses to write to README.md when the
+1-minute load average is above 1.5 (`BENCH_LOAD_LIMIT` to change the limit,
+`BENCH_ALLOW_LOAD=1` to override); it only warns when just printing.
+
 ---
 
 ## 2026-07-28 — baseline measurements before fixing the philosophy
@@ -727,3 +734,102 @@ why the comparison is best-of-5 and interleaved.
 
 LTO also did not finish linking within 10 minutes at `-j$(nproc)` on the B960.
 `build-lto/` was removed; the default build stays `-O3` without LTO.
+
+---
+
+## 2026-09-15 — regenerating the README tables on an idle machine
+
+- **Commit:** `7b9b517`, plus the uncommitted working tree (the load guard in
+  `bench/bench.sh`, the generated raw-decode section, `bench/encstages.c`)
+- **Hardware:** Intel Pentium B960 @ 2.20GHz, 2 cores, 15.2 GiB RAM
+- **Compiler:** gcc 16.2.1, Release build
+- **Load at start:** 1.30 for `bench/bench.sh`, 1.37 for `bench/corpus.sh`,
+  both under the 1.5 limit. `BENCH_ALLOW_LOAD` was **not** used.
+
+Both README tables were regenerated with `bench/bench.sh --update-readme` and
+`bench/corpus.sh --update-readme`, closing the roadmap's "make the README
+benchmarks honest again" item.
+
+### Third-party tool versions
+
+Recorded here for the first time. Two of the changes below could not have been
+attributed without guessing, because no previous entry says which versions it
+measured against — that is the gap this table exists to close.
+
+| tool | version |
+|---|---|
+| cjxl / djxl | 0.12.0 |
+| avifenc / avifdec | 1.4.2 (aom v3.14.1, dav1d 1.5.4) |
+| cwebp | 1.6.0 |
+| ImageMagick | 7.1.2-29 Q16-HDRI |
+| ffmpeg | n9.0.1 |
+| oxipng | 10.2.0 |
+
+### What did not move: our own sizes
+
+Every PXL/APXL size came out byte-identical to the committed tables — 5994 on
+the chart, 47209 on the beach ball, 13 712 646 over the 186-file corpus, and
+13 633 519 for the raw-decode row. AVIF, QOI, GIF and oxipng are identical too.
+So the roadmap's premise was half wrong: the tables were stale in their
+*timings*, not in the sizes, and nothing in the filter work changed a byte of
+output on these corpora.
+
+### What did move, and why
+
+**JXL got substantially smaller**, at the same default effort 7 (`cjxl --help`
+confirms 7 is still the default; `bench/bench.sh` passes only `-d 0
+--num_threads=0`, so the "effort 7/10" label in the table is accurate):
+
+| measurement | before | after |
+|---|---:|---:|
+| chart | 5963 (19.5%) | 3538 (11.6%) |
+| beach ball | 52509 (84.7%) | 51766 (83.5%) |
+| corpus | 10 339 194 (66.7%) | 10 191 764 (65.7%) |
+
+On the chart JXL went from level with PXL (19.5% vs 19.6%) to roughly half its
+size. Size is deterministic for a fixed encoder and setting, so this is a
+libjxl version change, not a measurement artifact. Which version it improved
+over is unrecoverable — see the table above.
+
+**WebP changed encoder path, not version.** The corpus row's own label records
+it: `lossless (-lossless 1)` before, `lossless (-lossless)` after.
+`bench/corpus.sh:133` prefers `cwebp` and only falls back to ffmpeg's libwebp,
+so cwebp is now installed where it was not before. The 11 385 268 -> 11 390 236
+bytes (+4968, +0.04%) is two implementations disagreeing, not a regression.
+
+### The timing columns are not comparable across runs
+
+Corpus encode time roughly halved on every row, PXL included:
+
+| row | before (ms/file) | after (ms/file) |
+|---|---:|---:|
+| PXL | 140.3 | 85.6 |
+| JXL | 526.7 | 320.8 |
+| WebP | 313.6 | 102.2 |
+| AVIF | 309.4 | 144.7 |
+| oxipng | 1041.2 | 528.8 |
+
+PXL's bytes are identical and its code has not changed since the previous run,
+so its 1.64x is not a speedup — something outside the codec moved. The
+single-image table does not tell the same story, though: there PXL barely
+budged (encode 16 -> 15 ms) and decode got *worse* (16 -> 20 ms, APXL 36 -> 46),
+while the third-party tools dropped 1.3x to 4.4x (GIF animation 3759 -> 847 ms).
+`magick` and `avifenc` thread by default and contend badly on two cores;
+`cjxl` was pinned single-threaded and still halved.
+
+**Do not read a cause into this.** The previous run's load average was never
+recorded, so "the old numbers were taken on a busy machine" is the likely
+reading but not a measured one. It is exactly the ambiguity the load guard and
+the version table above are meant to prevent from recurring, and the honest
+conclusion today is narrower: timings from before 2026-09-15 are not
+comparable with timings after it, and only the size columns carry across.
+
+### A note for the next person benchmarking on this box
+
+Idle here is not idle. With the KDE session, Claude Desktop, immich and a wine
+service running, `vmstat 2` shows a steady 35% of both cores in use (us 21-24%,
+sy 13-15%, ~9000 context switches/s) with no single process above 4%. That is a
+load-average floor near 1.0, so the 1.5 limit is tight rather than generous:
+expect to wait 70-90 seconds after any build before the guard will let a
+publishing run through, and expect even a no-op `cmake --build` to push it back
+over the line.

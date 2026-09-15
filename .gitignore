@@ -1,6 +1,7 @@
 /build/
 /build-vendored/
 /build-asan/
+/build-prof/
 /kde/build/
 # Staging prefixes used to point FFmpeg's pkg-config at a local libpxl build
 /_inst/
@@ -30,6 +31,12 @@ pxl_interop_tmp.png
 /tests/data/Kodak-Lossless-True-Color-Image-Suite/
 /tests/data/The-official-test-suite-for-PNG/
 /tests/data/USC-SIPI-Image-Database/
+# CLIC 2020 mobile training split: 1048 high-resolution photographs, 3.8 GB.
+/tests/data/CLIC-2020-mobile-train/
+# Anita: an industrial animation dataset. 16871 PNG frames in 367 shots, 11 GB.
+# Three passes per shot (sketch/composition/color), so it is the first corpus
+# that exercises .apxl cross-frame coding on real hand-drawn animation.
+/tests/data/AnitaDataset/
 /tests/data/Video_24fps.mp4
 /tests/data/bad-apple.mp4
 /tests/data/Video_24fps_96f.apng

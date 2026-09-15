@@ -38,6 +38,21 @@ cd "$workdir"
 
 log() { echo "# $*" >&2; }
 
+# Timings taken while something else is saturating the CPU are inflated by 2-3x
+# across every row, which is invisible once the numbers are in the README. Warn,
+# and refuse outright when asked to publish. Override with BENCH_ALLOW_LOAD=1.
+load1=$(awk '{print $1}' /proc/loadavg)
+load_limit=${BENCH_LOAD_LIMIT:-1.5}
+if awk -v l="$load1" -v m="$load_limit" 'BEGIN{exit !(l>m)}'; then
+    if [ "${1:-}" = "--update-readme" ] && [ -z "${BENCH_ALLOW_LOAD:-}" ]; then
+        echo "error: 1-minute load average is $load1 (limit $load_limit)." >&2
+        echo "       Publishing these timings to README.md would record noise as a result." >&2
+        echo "       Wait for the machine to go idle, or set BENCH_ALLOW_LOAD=1 to override." >&2
+        exit 1
+    fi
+    log "WARNING: load average is $load1 (limit $load_limit) - timings will be inflated"
+fi
+
 # Runs "$@" N times, discards output, and prints the median wall time in ms.
 median_ms() {
     local times=() start end
@@ -213,6 +228,105 @@ else
     log "WARNING: cjxl/djxl not found, skipping JXL animation row"
 fi
 
+# --- raw decode (no PNG re-encode) -------------------------------------------
+
+# The decode columns above time `pxltool d`/`da`, which write a PNG/APNG back
+# out, so they mostly measure libpng's deflate. pxl_bench_rawdec decodes
+# compressed bytes straight into a pixel buffer, which is what a viewer or a
+# game actually does. Summed over the Kodak corpus so one noisy file cannot
+# swing the result.
+rawdec_table=""
+rawdec_prose=""
+rawdec_bin=""
+if [ -n "${PXL_BENCH_RAWDEC:-}" ]; then
+    rawdec_bin="$PXL_BENCH_RAWDEC"
+elif [ -x "$repo_root/build/pxl_bench_rawdec" ]; then
+    rawdec_bin="$repo_root/build/pxl_bench_rawdec"
+fi
+
+kodak_dir="$repo_root/tests/data/Kodak-Lossless-True-Color-Image-Suite/PhotoCD_PCD0992"
+RAWDEC_REPS=${RAWDEC_REPS:-15}
+
+if [ -n "$rawdec_bin" ] && [ -d "$kodak_dir" ]; then
+    log "raw decode over $kodak_dir (median of $RAWDEC_REPS per file)"
+    raw_log="$workdir/rawdec.txt"
+    : > "$raw_log"
+    nfiles=0
+    for f in "$kodak_dir"/*.png; do
+        [ -e "$f" ] || continue
+        # Fields: decoder, median ms, MB/s, encoded bytes.
+        "$rawdec_bin" "$f" "$RAWDEC_REPS" 2>/dev/null \
+            | awk '/^(PXL|QOI|libpng)/ { print $1, $2, $4 }' >> "$raw_log"
+        nfiles=$((nfiles + 1))
+    done
+
+    if [ -s "$raw_log" ]; then
+        rawdec_table=$(awk '
+            { ms[$1] += $2; by[$1] += $3 }
+            END {
+                base_by = by["libpng"]
+                n = split("QOI PXL libpng", order, " ")
+                # Bold the winner per column, same convention as the tables
+                # above. Every decoder here is true-color lossless, so unlike
+                # GIF none of them need excluding.
+                for (i = 1; i <= n; i++) {
+                    d = order[i]
+                    if (!(d in ms)) continue
+                    if (best_ms == "" || ms[d] < best_ms) best_ms = ms[d]
+                    if (best_by == "" || by[d] < best_by) best_by = by[d]
+                }
+                print "| Decoder | Total ms | Total bytes | % of PNG |"
+                print "|---|---:|---:|---:|"
+                for (i = 1; i <= n; i++) {
+                    d = order[i]
+                    if (!(d in ms)) continue
+                    sms = sprintf("%.1f", ms[d])
+                    sby = sprintf("%d", by[d])
+                    pct = base_by ? sprintf("%.1f%%", by[d] / base_by * 100) : "-"
+                    if (d == "libpng") pct = "100%"
+                    if (ms[d] == best_ms) sms = "**" sms "**"
+                    if (by[d] == best_by) { sby = "**" sby "**"; pct = "**" pct "**" }
+                    printf "| %s | %s | %s | %s |\n", d, sms, sby, pct
+                }
+            }' "$raw_log")
+
+        rawdec_prose=$(awk -v nfiles="$nfiles" '
+            { ms[$1] += $2; by[$1] += $3 }
+            $1 == "PXL" { pxl[++np] = $2 }
+            $1 == "QOI" { qoi[++nq] = $2 }
+            END {
+                faster = 0
+                for (i = 1; i <= np && i <= nq; i++) if (qoi[i] < pxl[i]) faster++
+                printf "PXL decodes ~%.1fx faster than libpng and its files are %.1f%% smaller.\n", \
+                    ms["libpng"] / ms["PXL"], (1 - by["PXL"] / by["libpng"]) * 100
+                # Do not hardcode which of PXL/QOI wins on speed or size: state
+                # whichever way the run actually came out, from the same
+                # by[]/ms[] totals the table above is built from.
+                if (ms["QOI"] < ms["PXL"])
+                    printf "**QOI is faster than PXL**, by roughly %.0f%%, on %d of %d files", \
+                        (1 - ms["QOI"] / ms["PXL"]) * 100, faster, nfiles
+                else
+                    printf "PXL edges out QOI on speed, by roughly %.0f%%, though QOI still wins on %d of %d files", \
+                        (1 - ms["PXL"] / ms["QOI"]) * 100, faster, nfiles
+                qoi_pct = by["libpng"] ? by["QOI"] / by["libpng"] * 100 : 0
+                if (qoi_pct > 100)
+                    printf " \342\200\224 but QOI barely compresses at all, coming out to %.1f%% of the source PNGs.\n", qoi_pct
+                else
+                    printf ", at %.1f%% of the source PNGs.\n", qoi_pct
+                if (by["PXL"] < by["QOI"] && by["PXL"] < by["libpng"])
+                    print "So PXL sits between the two: near QOI on speed, ahead of both on size."
+                else if (by["PXL"] < by["QOI"])
+                    print "So PXL beats QOI on size, while sitting between libpng and QOI on speed."
+                else
+                    print "So the size/speed tradeoff here is closer than usual -- see the table above."
+            }' "$raw_log")
+    else
+        log "WARNING: pxl_bench_rawdec produced no output, skipping raw-decode table"
+    fi
+else
+    log "WARNING: pxl_bench_rawdec or the Kodak corpus is missing, skipping raw-decode table"
+fi
+
 # --- render ------------------------------------------------------------------
 
 # Bolds the winning (smallest) value in a column, skipping GIF -- its size
@@ -258,6 +372,32 @@ render_table() {
 cores=$(nproc)
 mem=$(free -h | awk '/^Mem:/ {print $2}')
 
+# Built separately from the main heredoc below: when the raw-decode run is
+# skipped, the whole section (heading and prose included) has to disappear,
+# not leave an empty table behind.
+rawdec_section=""
+if [ -n "$rawdec_table" ]; then
+    rawdec_section=$(cat <<EOF
+
+### Decode into raw pixels
+
+The decode columns above time \`pxltool d\`/\`da\`, which re-encode a PNG/APNG on
+the way out, so they mostly measure libpng's deflate rather than our decoder —
+libpng's deflate on write costs roughly 10x its inflate on read, which is why
+PXL and APXL look like they decode slower than they encode. \`pxl_decode\` and
+\`apxl_decode\` alone run in well under a millisecond on these inputs.
+
+Decoding compressed bytes straight to raw pixels over the 24 Kodak
+photographs, median of $RAWDEC_REPS reps per file (\`bench/rawdec\`, see
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+
+$rawdec_table
+
+$rawdec_prose
+EOF
+)
+fi
+
 output=$(cat <<EOF
 Measured on $cores CPU cores / ${mem} RAM, $N runs per cell (median wall time).
 Source files: [\`tests/data/RGB_24bits_palette_color_test_chart.png\`](tests/data/RGB_24bits_palette_color_test_chart.png)
@@ -283,14 +423,7 @@ true-color pixels — its numbers are not directly comparable to the other
 formats in these tables, and it is excluded from the bold "winner" markers
 above for the same reason.
 
-PXL/APXL decode slower than they encode here, which looks backwards for a
-zstd-based format (zstd itself decodes several times faster than it
-compresses). The gap is not in the codec: \`pxl_decode\`/\`apxl_decode\` alone
-run in well under a millisecond on these inputs. \`pxltool d\`/\`da\`, what this
-benchmark actually times, also re-encodes the result as a PNG/APNG on the way
-out, and libpng's zlib deflate on write costs roughly 10x what its inflate on
-read costs — that PNG-write cost, not decompression, is what dominates the
-decode column for PXL and APXL.
+$rawdec_section
 EOF
 )
 
