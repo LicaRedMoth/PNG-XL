@@ -50,8 +50,15 @@ measurements (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
   was 861 KB and the priority was failed until the codec was split into
   separate encode and decode units, which stopped the linker dragging the
   compressor into decoding builds. Our own decoder code is 26 KB of that.
-  Note this is binary size, not memory footprint — decode-time RAM against the
-  32 MB target has not been measured.
+- Decode-time memory — **not met**, and this is the one that binds. A 3000x3000
+  RGB photograph peaks at 62.9 MiB of RSS through `pxl_decode` and 53.3 MiB
+  through the streaming decoder, against libpng's 26.9 MiB: we hold the whole
+  filtered image and the whole pixel buffer at once, where libpng holds little
+  more than the output. Against the 32 MB target that caps us near 2270x2270,
+  while libpng decodes the 3000x3000 and fits. Animation is worse — `.apxl`
+  peaks at twice the entire animation, so one 8-frame 1080p shot needs 128 MiB.
+  Unfiltering only needs the previous row, so the fix is a bounded row buffer
+  rather than a whole-image one: decoder-side only, no format change.
 - File size — **met on photographs, not in general**: 85.5% of PNG across the
   Kodak photographic corpus, but 97.6% across the wider 396-file corpus. On the
   158 8-bit grayscale USC-SIPI plates we are at 100.3%, i.e. slightly *worse*

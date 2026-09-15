@@ -10,7 +10,24 @@ measurement states its sampling.
 
 ## Now
 
-Nothing is blocked. Pick from *Next*.
+### Bound the decoder's memory to the image, not twice the image
+
+Measured 2026-09-15: a 3000x3000 RGB photograph peaks at 62.9 MiB through
+`pxl_decode` and 53.3 MiB through the streaming decoder, against libpng's
+26.9 MiB; `.apxl` peaks at twice the whole animation. Against the 32 MB target
+that caps stills near 2270x2270 and animation near 30 frames at 480x272, so the
+target hardware is currently out of reach for anything larger. Numbers and cause
+in [`BENCHMARKS.md`](BENCHMARKS.md) and [`RESEARCH.md`](RESEARCH.md).
+
+The cause is that `filtered` is allocated at whole-image size and lives
+alongside the pixel buffer, in the streaming decoder too. Unfiltering depends
+only on the previous row, so a bounded ring buffer fed from
+`ZSTD_decompressStream` should reach roughly libpng's footprint with
+byte-identical output and no format change. Decoder-side only, same risk
+profile as the TU split that fixed decoder size.
+
+Do the still path first and re-measure before touching `apxl_decode`, whose
+double buffering is a separate and simpler fix.
 
 ### Done — the README benchmarks are honest again
 
