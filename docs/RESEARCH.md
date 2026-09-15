@@ -454,6 +454,24 @@ leaving its strong case unverified.
 Adding CLIC to the corpus table is cheap and worth doing, but it deepens the
 existing bias rather than fixing it.
 
+**Update 2026-09-15: the gap is closed, and the claim survived.** 442 real
+desktop screenshots (`tests/data/Screenshots`, personal and gitignored, so
+aggregates only) put PXL at **73.2% of PNG against 88.4% on the committed
+photographic corpus** — a 15-point gain on synthetic content, while JXL moves
+0.1 points over the same shift. The narrowing is therefore ours and not the
+corpus being easier: the gap to JXL closes from 22.7 points to 7.4, and PXL
+beats `oxipng -o max` by 5.8 points on the content PNG is most used for.
+AVIF turns out to *inflate* this content to 109.6% of the source PNGs.
+Numbers in [BENCHMARKS.md](BENCHMARKS.md); reproduce with
+`CORPUS_ONLY=tests/data/Screenshots bench/corpus.sh`.
+
+The bias noted above is real but now bounded: the photographic corpora
+understate the format by roughly 15 points relative to its own target content.
+What is still missing is a *committed* synthetic corpus — this one cannot be
+published, so the README's reproducible table still cannot show the format's
+best case. A small set of freely-licensed UI screenshots or rendered diagrams
+would fix that, and is the remaining piece.
+
 ### The README benchmark tables are stale
 
 **Observation.** The still-image and animation tables were generated before the

@@ -1155,3 +1155,63 @@ a great deal, but that is a different corpus and arguably a different product;
 the existing rejection bar for block-based work (>5% gain while keeping
 streaming decode, see RESEARCH.md on tiling) is not met by anything measured
 here.
+
+---
+
+## 2026-09-15 — the synthetic-stills gap, measured at last
+
+- **Commit:** `c849e62` + the `CORPUS_ONLY` / `--with-shots` additions
+- **Corpus:** 442 real desktop screenshots in `tests/data/Screenshots` — a
+  personal, gitignored folder, so **aggregate totals only** and no README row:
+  `bench/corpus.sh` refuses to splice it. 441 encoded; the one failure is a
+  0-byte file, not a codec problem. Character of the set: 92 under 0.1 Mpx,
+  228 between 0.1 and 1 Mpx, 121 over 1 Mpx; 343 RGB, 97 RGBA, 1 gray.
+- **Reproduce:** `CORPUS_ONLY=tests/data/Screenshots bench/corpus.sh`
+
+Both `RESEARCH.md` and `ROADMAP.md` have named the same gap repeatedly: every
+corpus available was photographic or animation, and nothing covered synthetic
+non-photographic stills — the content a PNG replacement is actually pointed at,
+and where the format's own philosophy claims its strength. That claim had never
+been tested. It is now.
+
+| Format | Files | Total bytes | % of PNG |
+|---|---:|---:|---:|
+| PXL | 441 | 49 542 325 | **73.2%** |
+| JXL | 441 | 44 566 566 | 65.8% |
+| WebP | 441 | 41 114 534 | **60.7%** |
+| AVIF | 441 | 74 256 020 | 109.6% |
+| PNG (oxipng -o max) | 441 | 53 469 076 | 79.0% |
+
+### Against the photographic corpus, which is the point
+
+| Format | 186 committed files | 442 screenshots | change |
+|---|---:|---:|---:|
+| PXL | 88.4% | **73.2%** | **-15.2 pts** |
+| JXL | 65.7% | 65.8% | +0.1 |
+| WebP | 73.4% | 60.7% | -12.7 |
+| AVIF | 89.4% | 109.6% | +20.2 |
+| oxipng -o max | 94.9% | 79.0% | -15.9 |
+
+**The philosophy holds.** PXL gains 15 points moving from photographs to
+synthetic content, while JXL does not move at all — so the narrowing is ours,
+not a property of the corpus being easier. The gap to JXL closes from 22.7
+points to **7.4**.
+
+Two results worth stating plainly:
+
+- **PXL beats `oxipng -o max` by 5.8 points** on the content PNG is most used
+  for, against a 6.5-point lead on photographs. For a format whose pitch is
+  "replace PNG", beating a maximum-effort PNG optimiser on its home ground is
+  the comparison that matters most, and it is the first time it has been made
+  on this content.
+- **AVIF comes out larger than the source PNGs** (109.6%). It is a photographic
+  codec and has nothing to offer here — worth remembering before anyone cites
+  its 89.4% on Kodak as a general figure.
+
+WebP still wins outright at 60.7%, as it does on photographs. Nothing here
+changes that; what changes is the distance.
+
+**Do not cite the encode-time column from this run.** It was taken at a
+1-minute load average of 2.68, above the 1.5 limit `bench/bench.sh` enforces,
+because the sizes were the question and sizes do not care about load. The
+timings in that run are inflated and were not recorded here.

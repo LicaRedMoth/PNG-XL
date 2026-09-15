@@ -57,8 +57,13 @@ measurements (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
   row window and is what the encoder picks for photographs, so the saving needs
   `-p` and costs 4-6.6% in size. Animation decodes at 1.03x the whole animation,
   which is the floor while the API hands back every frame.
-- File size — **met on photographs, not in general**: 85.5% of PNG across the
-  Kodak photographic corpus, but 97.6% across the wider 396-file corpus. On the
+- File size — **best on the content PNG is actually used for**: 73.2% of PNG
+  over 442 desktop screenshots, against 88.4% over the committed photographic
+  corpus and 97.6% across the wider 396-file one. Synthetic stills are where
+  the format is strongest — it beats `oxipng -o max` by 5.8 points there, and
+  the gap to JPEG XL narrows from 22.7 points to 7.4. The screenshot corpus is
+  personal and not committed, so that row cannot appear in the tables below;
+  see [docs/BENCHMARKS.md](docs/BENCHMARKS.md). On the
   158 8-bit grayscale USC-SIPI plates we are at 100.3%, i.e. slightly *worse*
   than PNG: the color filter does nothing on one channel, and on high-frequency
   aerials and textures zstd's edge over DEFLATE nearly vanishes.

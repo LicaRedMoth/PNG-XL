@@ -63,9 +63,14 @@ Personal, gitignored, never to be committed — `tests/data/Screenshots`
 (lossless PNG), `tests/data/Screenrecords` and `tests/data/Nightrecords` (H.264
 MP4). Only aggregate numbers from any of them may reach README.
 
-- **Screenshots is the one to wire into `bench/corpus.sh`**: lossless, and it
-  closes the synthetic-stills gap named below, which is still the only content
-  class the format claims to be good at and has never measured.
+- **Screenshots: done 2026-09-15.** Wired in as `--with-shots`, plus a
+  `CORPUS_ONLY` override so one content class can be measured on its own. Both
+  refuse `--update-readme`, because a personal corpus cannot back a
+  reproducible README number. Result: PXL 73.2% of PNG against 88.4% on
+  photographs, closing the gap to JXL from 22.7 points to 7.4 and beating
+  `oxipng -o max` by 5.8. **What remains is a committed synthetic corpus** —
+  freely-licensed screenshots or rendered diagrams — so the README can show the
+  format's best case rather than only its worst.
 - **Nightrecords** is worth decoding to frames as a *hard* stills corpus: real
   night footage is sensor-noise-heavy, and noise is the worst case for lossless
   coding. It would show where the ratio collapses. Caveat: lossy-sourced, so it
