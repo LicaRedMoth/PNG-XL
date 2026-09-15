@@ -324,6 +324,36 @@ static void rowfilter_decode(uint8_t type, const uint8_t* in, const uint8_t* pre
 }
 
 
+/* Matches the encoder's window (APXL uses 2^27); still images never need more,
+   but raising the limit costs nothing and keeps the two paths consistent. */
+#define PXL_STREAM_WINDOW_LOG_MAX 27
+
+
+/* Reconstruct one row from its filtered bytes. `prev` is the previous *output*
+   row, or NULL for the first row -- note it is read from the pixel buffer, not
+   from the filtered stream, which is what lets the filtered side be bounded.
+   `fwidth` is the geometry's filter width: for sub-8-bit images that is the
+   packed row length in bytes, not the pixel width. Returns 0 on a bad
+   filter-type byte. */
+static int unfilter_row(uint8_t color_filter, const uint8_t* in,
+                        uint8_t* cur, const uint8_t* prev, size_t row_stride,
+                        uint32_t fwidth, unsigned pixel_bytes)
+{
+    if (color_filter == PXL_FILTER_ADAPTIVE) {
+        uint8_t type = *in++;
+        if (type > PXL_ROWF_PAETH) {
+            return 0;
+        }
+        rowfilter_decode(type, in, prev, cur, row_stride, pixel_bytes);
+    } else if (color_filter == PXL_FILTER_NONE) {
+        memcpy(cur, in, row_stride);
+    } else {
+        unpack_delta_row(in, cur, fwidth, pixel_bytes);
+    }
+    return 1;
+}
+
+
 /* Reverse per-row adaptive filtering. Returns 1 on success, 0 on malformed
    input (e.g. bad filter-type byte or size mismatch). */
 static int unpack_adaptive(const uint8_t* input, size_t input_size, uint8_t* output,
@@ -384,6 +414,93 @@ static int reverse_filter(uint8_t filter, unsigned pixel_bytes,
 }
 
 
+/* Decompress a still frame one filtered row at a time, unfiltering each row
+   into `pixels` as soon as it lands.
+
+   This is the whole point of the bounded path: the filtered stream is consumed
+   through a single-row window instead of being materialised in full, so decode
+   memory is the output image plus one row plus zstd's own window, rather than
+   the output image twice over. Unfiltering can work this way because every row
+   filter reads at most the row above, and that row is taken from `pixels`,
+   which is fully allocated anyway.
+
+   BCIF is the exception and must not be sent here: its plane-split layout
+   completes no row until the final plane byte, so it has no row window.
+
+   Returns 1 on success, 0 on a truncated, corrupt or over-long frame. */
+static int decode_rows_bounded(const uint8_t* src, size_t src_size,
+                               uint8_t color_filter, const pxl_geometry* g,
+                               uint32_t height, uint8_t* pixels)
+{
+    size_t row_stride  = (size_t)g->filter_width * g->pixel_bytes;
+    size_t frow_stride = (color_filter == PXL_FILTER_ADAPTIVE) ? row_stride + 1
+                                                               : row_stride;
+    uint8_t* frow = (uint8_t*)malloc(frow_stride);
+    ZSTD_DStream* ds = ZSTD_createDStream();
+    ZSTD_inBuffer in;
+    ZSTD_outBuffer out;
+    uint32_t y = 0;
+    int ok = 0;
+
+    if (!frow || !ds || ZSTD_isError(ZSTD_initDStream(ds))) {
+        goto done;
+    }
+    ZSTD_DCtx_setParameter(ds, ZSTD_d_windowLogMax, PXL_STREAM_WINDOW_LOG_MAX);
+
+    in.src = src;   in.size = src_size;    in.pos = 0;
+    out.dst = frow; out.size = frow_stride; out.pos = 0;
+
+    while (y < height) {
+        if (out.pos < frow_stride) {
+            size_t in_before = in.pos, out_before = out.pos;
+            size_t ret = ZSTD_decompressStream(ds, &out, &in);
+            if (ZSTD_isError(ret)) {
+                goto done;
+            }
+            /* Neither side moved and the row is still short: the frame ended
+               early, or is corrupt. Either way we cannot finish. */
+            if (out.pos < frow_stride &&
+                in.pos == in_before && out.pos == out_before) {
+                goto done;
+            }
+        }
+        if (out.pos == frow_stride) {
+            uint8_t* cur = pixels + (size_t)y * row_stride;
+            const uint8_t* prev = y ? cur - row_stride : NULL;
+            if (!unfilter_row(color_filter, frow, cur, prev, row_stride,
+                              g->filter_width, g->pixel_bytes)) {
+                goto done;
+            }
+            out.pos = 0;
+            ++y;
+        }
+    }
+
+    /* The old one-shot path rejected a frame that decompressed to more than
+       raw_byte_count; keep that, or a crafted file could hide trailing data
+       behind a valid-looking image. One more byte of output means over-long. */
+    {
+        size_t in_before = in.pos;
+        out.size = 1;
+        out.pos = 0;
+        if (in.pos < in.size) {
+            size_t ret = ZSTD_decompressStream(ds, &out, &in);
+            if (ZSTD_isError(ret) || out.pos != 0) {
+                goto done;
+            }
+            (void)in_before;
+        }
+    }
+    ok = 1;
+done:
+    if (ds) {
+        ZSTD_freeDStream(ds);
+    }
+    free(frow);
+    return ok;
+}
+
+
 pxl_image pxl_decode(pxl_buffer file)
 {
     pxl_image img;
@@ -436,32 +553,36 @@ pxl_image pxl_decode(pxl_buffer file)
     }
     frame_off += h.meta_byte_count;
 
-    filtered = (uint8_t*)malloc(h.raw_byte_count);
-    if (!filtered) {
-        return img;
-    }
-
-    dsize = ZSTD_decompress(filtered, h.raw_byte_count,
-                            file.data + frame_off,
-                            file.size - frame_off);
-    if (ZSTD_isError(dsize) || dsize != h.raw_byte_count) {
-        free(filtered);
-        return img;
-    }
-
     pixels = (uint8_t*)malloc(pixel_bytes_total);
     if (!pixels) {
-        free(filtered);
         return img;
     }
 
-    if (!reverse_filter(h.color_filter, pixel_bytes, filtered, dsize, pixels,
-                        g.filter_width, h.height)) {
+    if (h.color_filter == PXL_FILTER_BCIF) {
+        /* BCIF has no row window (see decode_rows_bounded), so it is the one
+           filter that still materialises the whole filtered image. */
+        filtered = (uint8_t*)malloc(h.raw_byte_count);
+        if (!filtered) {
+            free(pixels);
+            return img;
+        }
+        dsize = ZSTD_decompress(filtered, h.raw_byte_count,
+                                file.data + frame_off,
+                                file.size - frame_off);
+        if (ZSTD_isError(dsize) || dsize != h.raw_byte_count ||
+            !reverse_filter(h.color_filter, pixel_bytes, filtered, dsize, pixels,
+                            g.filter_width, h.height)) {
+            free(filtered);
+            free(pixels);
+            return img;
+        }
         free(filtered);
+    } else if (!decode_rows_bounded(file.data + frame_off,
+                                    file.size - frame_off,
+                                    h.color_filter, &g, h.height, pixels)) {
         free(pixels);
         return img;
     }
-    free(filtered);
 
     /* Copy out the palette. It is structural: without it an indexed image is
        undecodable, so OOM here fails the whole decode (unlike metadata). */
@@ -543,10 +664,6 @@ pxl_image pxl_decode(pxl_buffer file)
 #define PXL_ST_FRAME   3
 #define PXL_ST_ERROR   (-1)
 
-/* Matches the encoder's window (APXL uses 2^27); still images never need more,
-   but raising the limit costs nothing and keeps the two paths consistent. */
-#define PXL_STREAM_WINDOW_LOG_MAX 27
-
 struct pxl_stream {
     pxl_row_cb cb;
     void*      user;
@@ -565,7 +682,9 @@ struct pxl_stream {
     size_t     frow_stride;  /* filtered bytes per row (adaptive adds the type byte) */
 
     pxl_image  img;          /* progressively filled pixels + metadata */
-    uint8_t*   filtered;     /* decompressed filtered stream */
+    uint8_t*   filtered;     /* filtered bytes: one row, or the whole image
+                                under BCIF (see stream_begin) */
+    size_t     filtered_cap;
     size_t     filtered_have;
     size_t     meta_have;
     uint32_t   rows_done;
@@ -584,28 +703,18 @@ static int stream_emit_rows(pxl_stream* s)
         return 0; /* not row-progressive; handled in pxl_stream_finish */
     }
 
-    while (s->rows_done < s->h.height &&
-           s->filtered_have >= (size_t)(s->rows_done + 1) * s->frow_stride) {
-        const uint8_t* in = s->filtered + (size_t)s->rows_done * s->frow_stride;
+    /* The filtered window holds exactly one row, so a completed row always
+       sits at its start, and is consumed before the next one is decompressed. */
+    while (s->rows_done < s->h.height && s->filtered_have >= s->frow_stride) {
         uint8_t* cur = s->img.buffer.data + (size_t)s->rows_done * s->row_stride;
+        const uint8_t* prev = s->rows_done ? cur - s->row_stride : NULL;
 
-        if (s->h.color_filter == PXL_FILTER_ADAPTIVE) {
-            uint8_t type = *in++;
-            const uint8_t* prev = s->rows_done ? cur - s->row_stride : NULL;
-            if (type > PXL_ROWF_PAETH) {
-                s->state = PXL_ST_ERROR;
-                return -1;
-            }
-            rowfilter_decode(type, in, prev, cur, s->row_stride, s->pixel_bytes);
-        } else if (s->h.color_filter == PXL_FILTER_NONE) {
-            memcpy(cur, in, s->row_stride);
-        } else {
-            /* filter_width, not width: for sub-8-bit images a row is the
-               packed byte count, which is smaller than the pixel width. Passing
-               the width here wrote past the row -- and past the buffer on the
-               last one. */
-            unpack_delta_row(in, cur, s->g.filter_width, s->pixel_bytes);
+        if (!unfilter_row(s->h.color_filter, s->filtered, cur, prev,
+                          s->row_stride, s->g.filter_width, s->pixel_bytes)) {
+            s->state = PXL_ST_ERROR;
+            return -1;
         }
+        s->filtered_have = 0;
 
         /* Check before the callback: the consumer will use these samples as
            palette subscripts the moment it sees them. */
@@ -656,7 +765,12 @@ static int stream_begin(pxl_stream* s)
     s->frow_stride = (s->h.color_filter == PXL_FILTER_ADAPTIVE)
                          ? s->row_stride + 1 : s->row_stride;
 
-    s->filtered = (uint8_t*)malloc(s->h.raw_byte_count);
+    /* Only BCIF needs the whole filtered image at once; every row filter is
+       unfiltered through a single-row window, which is what keeps decode
+       memory at the output image rather than twice it. */
+    s->filtered_cap = (s->h.color_filter == PXL_FILTER_BCIF)
+                          ? s->h.raw_byte_count : s->frow_stride;
+    s->filtered = (uint8_t*)malloc(s->filtered_cap);
     s->img.buffer.data = (unsigned char*)malloc(pixels_total);
     if (!s->filtered || !s->img.buffer.data) {
         return 0;
@@ -807,29 +921,44 @@ int pxl_stream_feed(pxl_stream* s, const void* data, size_t len)
             in.size = len;
             in.pos = 0;
             out.dst = s->filtered;
-            out.size = s->h.raw_byte_count;
+            out.size = s->filtered_cap;
             out.pos = s->filtered_have;
 
-            while (in.pos < in.size && !s->frame_done) {
+            /* Not "while there is input left": with a one-row window zstd
+               routinely stops because the window is full, still holding
+               decoded bytes internally. Those have to be drained by calling it
+               again after the row is consumed, even once the input is spent,
+               or the last rows never arrive. Loop on progress instead. */
+            for (;;) {
                 size_t in_before = in.pos, out_before = out.pos;
-                size_t ret = ZSTD_decompressStream(s->ds, &out, &in);
+                size_t ret = 1;
                 int rows;
-                if (ZSTD_isError(ret)) {
-                    s->state = PXL_ST_ERROR;
-                    return -1;
+
+                if (s->frame_done) {
+                    break;
+                }
+                if (out.pos < out.size) {
+                    ret = ZSTD_decompressStream(s->ds, &out, &in);
+                    if (ZSTD_isError(ret)) {
+                        s->state = PXL_ST_ERROR;
+                        return -1;
+                    }
                 }
                 s->filtered_have = out.pos;
                 rows = stream_emit_rows(s);
                 if (rows < 0) {
                     return -1;
                 }
+                /* Emitted rows free the window again, so zstd keeps writing
+                   from the front of it rather than running out of room. */
+                out.pos = s->filtered_have;
                 total += rows;
                 if (ret == 0) {
                     s->frame_done = 1;
                     break;
                 }
-                if (in.pos == in_before && out.pos == out_before) {
-                    break; /* output full: the frame is larger than declared */
+                if (in.pos == in_before && out.pos == out_before && rows == 0) {
+                    break; /* nothing moved: need more input, or over-long frame */
                 }
             }
             p += in.pos;
@@ -858,8 +987,18 @@ const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready)
 
 int pxl_stream_finish(pxl_stream* s)
 {
-    if (!s || s->state != PXL_ST_FRAME || !s->frame_done ||
-        s->filtered_have != s->h.raw_byte_count) {
+    if (!s || s->state != PXL_ST_FRAME || !s->frame_done) {
+        return 0;
+    }
+
+    /* With a one-row window `filtered_have` no longer counts up to
+       raw_byte_count, so completeness is "every row emitted, nothing left
+       half-decompressed". BCIF still fills the whole buffer before it starts. */
+    if (s->h.color_filter != PXL_FILTER_BCIF) {
+        if (s->filtered_have != 0) {
+            return 0;
+        }
+    } else if (s->filtered_have != s->h.raw_byte_count) {
         return 0;
     }
 
