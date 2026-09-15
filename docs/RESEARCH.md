@@ -82,6 +82,59 @@ and without the dictionary is the same machinery and the same cost model, and
 the header then records which was used. That keeps the win on the files that
 want it and the loss off every file that does not.
 
+**Where the benefit lives, measured rather than assumed.** 97 files across
+three corpora, same 9.6 KB dictionary:
+
+| filtered stream | files | vs no dict | saved per file |
+|---|---:|---:|---:|
+| < 2 KB | 58 | 96.1% | 6 B |
+| **2 - 8 KB** | 23 | **84.9%** | 83 B |
+| 32 - 128 KB | 1 | 96.5% | 190 B |
+| 128 - 512 KB | 9 | 97.9% | 206 B |
+| > 2 MB | 6 | **109.4%** | **-17 951 B** |
+
+The saving is near-constant in bytes -- it plateaus around 200 and stops growing
+-- because a dictionary only helps at the start of a stream. After that the
+compressor's own history is richer than any generic dictionary, since it holds
+this image's patterns rather than images-in-general. A constant saving divided
+by file size is why the percentage collapses: 200 bytes is 15% of a 5 KB file
+and 0.003% of a 7 MB one.
+
+So the sweet spot is a 2-8 KB filtered stream, which is 32x32 to 48x48 RGBA --
+icon dimensions, arrived at by measurement rather than chosen. Below 2 KB there
+is too little to match (6 bytes saved); above 2 MB dictionary mode's own cost
+takes over.
+
+Photographs are doubly unsuited, and the second reason is independent of size: a
+dictionary can only hold what recurs *between* files, and filtered photographic
+residue is close to noise with nothing in common from one photo to the next.
+Interfaces share fonts, borders and gradients; photographs share nothing.
+
+**On shipping a dictionary at all — the reproducibility objection.** Raised, and
+it is the right objection: a decoder written from SPEC.md alone must be able to
+get everything it needs from SPEC.md. That does not rule a dictionary out, it
+rules out an *external* one. Brotli prints its 120 KB dictionary in RFC 7932
+Appendix A as normative text, and JPEG's example Huffman tables are in Annex K
+of T.81; either is the precedent. PNG's own ban on preset dictionaries (the
+zlib FDICT bit must be zero) is a 1996 portability decision about wrapping an
+existing zlib stream, not a principle.
+
+So the real cost is ~10 KB of hex in SPEC.md and the same blob in the decoder,
+against a format whose stated virtue is being readable in an evening. That is a
+judgement call, not a measurement, and it should be made after point 1 below.
+
+**Deriving the dictionary from the image itself and storing it in metadata --
+rejected, and it cannot be made to work.** A dictionary is worth something only
+because it is *not transmitted*: both sides already have it, so its contents are
+free. Store it in the file and it becomes ordinary data that costs its own size,
+so an N-byte dictionary can save at most about N bytes. Worse, it is redundant
+by construction: LZ already refers back to anything it has read in this same
+stream, so every match a self-derived dictionary could offer is one the
+compressor can already make. The only case where it would not be redundant is a
+compression window smaller than the file, and at level 12 the window covers the
+whole file (and `.apxl` sets 128 MiB outright). Recorded because the idea looks
+so reasonable that it will be proposed again.
+
 **What is not yet known, and would decide how much this is really worth:**
 1. Whether it generalises. PngSuite is a conformance suite — tiny, synthetic and
    homogeneous — and the weak cross-class transfer above says a dictionary
