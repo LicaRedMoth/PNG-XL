@@ -189,6 +189,24 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Where encode time goes (filtering vs zstd, per candidate filter), and whether
+# a cheap probe level ranks the candidates the same way the full level does.
+# Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
+# apply_filter is static.
+add_executable(pxl_bench_encstages bench/encstages.c
+                                   src/pxl_codec_common.c
+                                   src/pxl_png.c
+                                   src/pxl_pngio.c
+                                   src/pxl_meta.c
+                                   src/pxl_io.c)
+target_include_directories(pxl_bench_encstages PRIVATE src)
+target_link_libraries(pxl_bench_encstages PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_encstages PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_encstages PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 # Which per-row filters the adaptive filter actually picks, over a corpus.
 # Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
 # the row-filter helpers are static.
