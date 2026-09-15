@@ -1041,3 +1041,39 @@ past the buffer on the last one, in the progressive path a viewer uses on
 downloading data. The palette index check hides it unless the palette is fully
 populated. Confirmed under ASAN and fixed separately in `cab6ccf`, ahead of
 this work, so it can be taken on its own.
+
+---
+
+## 2026-09-15 — animation decode memory: frames point into the stream
+
+- **Commit:** `db07781` as the before; method as the two entries above.
+
+`apxl_decode` decompressed every frame into one concatenated block, then
+allocated a separate canvas per frame and copied into it, freeing the block
+only after the loop — so peak was twice the whole animation. But the block
+*already is* the frame sequence, in order, so the copy bought nothing. Frames
+now point into it, and `apxl_anim` carries the block as `storage`.
+
+8 frames of 1920x1080 RGBA from the Anita `pirate/sketch/204_a` shot, 63.3 MiB
+of pixels in total:
+
+| encode | before | after | x animation |
+|---|---:|---:|---:|
+| level 12 (LDM on) | 128.3 | **65.2** | 1.03x |
+| level 9 (LDM off) | 131.7 | **68.6** | 1.08x |
+
+That is the floor for this API: `apxl_decode` returns every frame, so it cannot
+hold less than every frame. Output verified identical, `ctest` green, ASAN
+clean on both ownership shapes — decoded animations free the shared block,
+hand-built ones (`apng_load`, the encoder's callers) still own their frames
+individually and are unaffected.
+
+**Why this stayed one-shot.** The obvious symmetry with the still path would be
+to stream frame by frame, but that would be a large regression here: one-shot
+`ZSTD_decompressDCtx` lets the destination serve as the window, while
+`ZSTD_decompressStream` must allocate its own — and `APXL_WINDOW_LOG` is 27, so
+LDM files would have added a 128 MiB window to buy back 63 MiB of frames. The
+deeper reason is structural: cross-frame matching means the decoder must keep
+previous frames reachable, and in this design the output buffer *is* that
+window. Bounded memory and cross-frame matching pull against each other; the
+copy was the accidental cost, the retained frames are the real one.

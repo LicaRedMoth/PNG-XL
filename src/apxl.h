@@ -30,7 +30,8 @@ extern "C" {
    dispose/blend ops are resolved by the front end at load time, so playback
    needs nothing but the pixels and the delay. */
 typedef struct {
-    pxl_image image;      /* full canvas frame (owns its buffer) */
+    pxl_image image;      /* full canvas frame. Owns its buffer only when the
+                             animation's `storage` is empty -- see apxl_anim. */
     uint16_t  delay_num;  /* display time = delay_num/delay_den seconds */
     uint16_t  delay_den;  /* 0 is treated as 100 per the APNG spec */
 } apxl_frame;
@@ -45,6 +46,14 @@ typedef struct {
     uint8_t     channels;         /* 1..4 */
     uint8_t     bytes_per_channel;/* 1 or 2 */
     pxl_buffer  metadata;         /* preserved ancillary chunks (may be empty) */
+    /* Frames decoded by apxl_decode all point into this one block rather than
+       owning separate buffers: the decompressed stream is already the frame
+       sequence, so copying each frame out of it doubled peak memory for no
+       gain. apxl_free releases the block and leaves the frame buffers alone.
+       Animations assembled by hand (apng_load, the encoder's callers) leave
+       this empty and keep owning their frames individually, so both shapes
+       free correctly. */
+    pxl_buffer  storage;
 } apxl_anim;
 
 /* Encode an animation into a complete .apxl byte stream.

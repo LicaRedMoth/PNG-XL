@@ -33,9 +33,11 @@ picks for photographs, so the saving needs `-p` and costs 4-6.6% in size. That
 makes removing BCIF a live question again rather than a matter of taste — see
 [`RESEARCH.md`](RESEARCH.md).
 
-**Remaining:** `apxl_decode` still peaks at twice the whole animation. It is the
-simpler of the two fixes: decode frame by frame rather than materialising every
-frame and then copying each one out of the concatenated buffer.
+**Animation done 2026-09-15** too: frames now point into the decompressed block
+instead of being copied out of it, so peak went 128.3 -> 65.2 MiB on 8 frames of
+1080p RGBA, which is 1.03x the animation and the floor for an API that returns
+every frame. Note it stayed one-shot deliberately — streaming would have had to
+allocate a 128 MiB LDM window to save 63 MiB of frames.
 
 ### Done — the README benchmarks are honest again
 

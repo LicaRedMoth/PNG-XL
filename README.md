@@ -55,8 +55,8 @@ measurements (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
   3000x3000 RGB photograph peaks at 27.6 MiB against libpng's 26.9, down from
   53.2, and a 9-megapixel image fits the 32 MB target. The catch: BCIF has no
   row window and is what the encoder picks for photographs, so the saving needs
-  `-p` and costs 4-6.6% in size. Animation is untouched and still peaks at
-  twice the whole animation.
+  `-p` and costs 4-6.6% in size. Animation decodes at 1.03x the whole animation,
+  which is the floor while the API hands back every frame.
 - File size — **met on photographs, not in general**: 85.5% of PNG across the
   Kodak photographic corpus, but 97.6% across the wider 396-file corpus. On the
   158 8-bit grayscale USC-SIPI plates we are at 100.3%, i.e. slightly *worse*

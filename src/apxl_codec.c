@@ -229,11 +229,14 @@ apxl_anim apxl_decode(pxl_buffer file)
         }
     }
 
+    /* Point each frame into the decompressed block instead of copying it out.
+       The copy used to double peak memory -- the whole animation in `raw` plus
+       the whole animation again in per-frame buffers -- for no benefit, since
+       the block already holds exactly the frame sequence in order. */
+    anim.storage.data = raw;
+    anim.storage.size = fh.raw_byte_count;
     for (i = 0; i < fh.frame_count; ++i) {
-        uint8_t* fb = (uint8_t*)malloc(canvas_bytes);
-        if (!fb) { free(raw); apxl_free(&anim); memset(&anim, 0, sizeof(anim)); return anim; }
-        memcpy(fb, raw + i * canvas_bytes, canvas_bytes);
-        anim.frames[i].image.buffer.data = fb;
+        anim.frames[i].image.buffer.data = raw + (size_t)i * canvas_bytes;
         anim.frames[i].image.buffer.size = canvas_bytes;
         anim.frames[i].image.width = fh.canvas_w;
         anim.frames[i].image.height = fh.canvas_h;
@@ -242,7 +245,6 @@ apxl_anim apxl_decode(pxl_buffer file)
         anim.frames[i].delay_num = pxl_get_le16(timing + i * APXL_TIMING_BYTES);
         anim.frames[i].delay_den = pxl_get_le16(timing + i * APXL_TIMING_BYTES + 2);
     }
-    free(raw);
 
     anim.frame_count = fh.frame_count;
     anim.loop_count = fh.loop_count;
@@ -259,11 +261,16 @@ void apxl_free(apxl_anim* anim)
     if (anim->frames) {
         uint32_t i;
         for (i = 0; i < anim->frame_count; ++i) {
-            pxl_free(&anim->frames[i].image.buffer);
+            /* Frames own their pixels only when there is no shared block; with
+               one they are interior pointers and must not be freed. */
+            if (!anim->storage.data) {
+                pxl_free(&anim->frames[i].image.buffer);
+            }
             pxl_free(&anim->frames[i].image.metadata);
         }
         free(anim->frames);
     }
+    pxl_free(&anim->storage);
     pxl_free(&anim->metadata);
     memset(anim, 0, sizeof(*anim));
 }
