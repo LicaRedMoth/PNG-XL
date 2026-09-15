@@ -99,6 +99,43 @@ measurements; they just no longer need this one.
 plus a full-image pixel buffer. That, not `.text`, is now the open question for
 the target hardware.
 
+### Decode-time memory — the priority that actually binds
+**Measured 2026-09-15, same day as the entry above and directly out of it.**
+Peak RSS of minimal decoders; numbers and method in [BENCHMARKS.md](BENCHMARKS.md).
+
+**Problem.** On a 3000x3000 RGB photograph `pxl_decode` peaks at 62.9 MiB and
+the streaming decoder at 53.3 MiB, against libpng's 26.9 MiB — that is 2.44x
+and 2.07x the pixel buffer against libpng's 1.04x. `apxl_decode` peaks at twice
+the entire animation, so one 8-frame 1080p shot needs 128 MiB. Against the
+32 MB target the still path tops out around 2270x2270 and the animation path
+around 30 frames at the PSP's native 480x272.
+
+**Cause, read off the code rather than guessed.** `pxl_decode`
+(`pxl_codec_decode.c:439-464`) holds `filtered` at full `raw_byte_count` and
+`pixels` at full size simultaneously. `pxl_stream_new` (`:655-656`) allocates
+the same two full buffers, so **progressive decode does not reduce footprint**
+— it only streams the compressed input. `apxl_decode` (`apxl_codec.c:212-245`)
+materializes all frames in one `raw` buffer and then copies each frame into its
+own allocation before freeing `raw`.
+
+**A hypothesis this killed.** The 128 MiB `APXL_WINDOW_LOG` was suspected of
+forcing a huge window on the decoder. It does not: `apxl_decode` decompresses
+one-shot, where the destination is the window. LDM on and off differ by 3.5 MiB
+and in the opposite direction. Do not reopen this one.
+
+**Possible solution, not yet measured.** Unfiltering depends only on the
+previous row, so `filtered` need not be the whole image — a bounded ring buffer
+of a few rows fed from `ZSTD_decompressStream` should bring the streaming path
+to roughly 1.0x plus a constant, i.e. libpng's footprint, with byte-identical
+output and no format change. Same per frame for `apxl_decode`. This is the same
+class of decoder-side-only work as the TU split, and on the evidence above it is
+the highest-value item open.
+
+**Decision:** open, and it supersedes decoder size as the binding constraint on
+the target hardware. Note the ordering lesson: `.text` was tracked for months
+while the figure that actually decides whether a PSP can open a photograph was
+never taken.
+
 ### The comparison with QOI was stated incorrectly
 **Problem:** it was claimed that PXL beats QOI. Measurement 3 shows the
 opposite: QOI is faster on 24 out of 24 photographs, by roughly 30%.

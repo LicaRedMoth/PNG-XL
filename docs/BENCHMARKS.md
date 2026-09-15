@@ -883,3 +883,95 @@ way, libpng + zlib is 271 441 against our 174 066 — 36% smaller, not 17%.
 Nothing here measures RAM at decode time, and the PSP-class target is a 32 MB
 budget; zstd's window and the full-image pixel buffer are the figures that
 matter there, and neither has been measured yet.
+
+---
+
+## 2026-09-15 — decode-time memory against the 32 MB target
+
+- **Commit:** `9321ffe`
+- **Hardware / compiler:** Intel Pentium B960, gcc 16.2.1, Release
+- **Method:** peak RSS of minimal decoding programs via `getrusage(RUSAGE_CHILDREN)`
+  (`ru_maxrss`), max of 3 runs, minus an empty program's 1528 KiB baseline.
+  GNU `time` is not installed on this machine; a 20-line fork/wait wrapper was
+  used instead. Memory, not timing, so machine load is irrelevant.
+
+The previous entry established that the decoder *fits* (174 KB of `.text`) but
+explicitly did not say it *runs* in the 32 MB budget. This measures that.
+
+### Still images, net MiB after baseline
+
+| image | pixels | `pxl_decode` | `pxl_stream` | libpng |
+|---|---:|---:|---:|---:|
+| 768x512 RGB | 1.1 | 3.4 | 4.0 | 2.2 |
+| 2250x2250 RGB | 14.5 | 40.9 | 30.8 | 15.6 |
+| 3000x3000 RGB | 25.7 | **62.9** | **53.3** | **26.9** |
+
+At 3000x3000 that is **2.44x the pixel buffer one-shot, 2.07x streaming,
+against libpng's 1.04x**. libpng is essentially the output image and nothing
+else; we are the output image twice over.
+
+### The cause is structural, and it is in the code
+
+`pxl_decode` (`src/pxl_codec_decode.c:439-464`) allocates `filtered` at
+`raw_byte_count`, decompresses the whole frame into it, allocates `pixels` at
+full size, unfilters across, and only then frees `filtered`. Both full-size
+buffers are live simultaneously, on top of the caller's compressed input.
+
+The streaming decoder does not fix this. `pxl_stream_new`
+(`src/pxl_codec_decode.c:655-656`) allocates the same two full-size buffers;
+`ZSTD_decompressStream` only spares it the compressed input, which is the
+10.7 MiB of difference between the two columns above. Progressive decode buys
+early rows, not a smaller footprint — the API says as much ("rows still
+accumulate in the buffer exposed by `pxl_stream_image`"), but the consequence
+was never measured. On the 768x512 file streaming is actually *worse* (4.0 vs
+3.4 MiB), because the `ZSTD_DStream` window outweighs the input it saves.
+
+### Animation is worse: 2x the entire animation
+
+`apxl_decode` (`src/apxl_codec.c:212-245`) decompresses every frame into one
+concatenated `raw` buffer, then mallocs a separate full canvas per frame and
+memcpys into it, freeing `raw` only after the loop. Peak is therefore twice the
+whole animation, regardless of frame count.
+
+Measured on 8 frames of 1920x1080 RGBA from the Anita `pirate/sketch/204_a`
+shot (63.3 MiB of pixels in total):
+
+| encode | peak, net MiB | x whole animation |
+|---|---:|---:|
+| level 12 (LDM on) | 128.3 | 2.03x |
+| level 9 (LDM off) | 131.8 | 2.08x |
+
+### A correction: the 128 MiB LDM window is not allocated
+
+It was suspected that `APXL_WINDOW_LOG 27` (`src/apxl_codec.c:22`) would force
+a 128 MiB window on the decoder and put `.apxl` out of reach of the target
+outright. **That is wrong.** `apxl_decode` uses one-shot `ZSTD_decompressDCtx`,
+where the destination buffer serves as the window, so no window is allocated.
+The two rows above differ by 3.5 MiB in the *opposite* direction to the
+hypothesis. The `.apxl` memory problem is real but it is the double buffering,
+not the window.
+
+### What this means for the 32 MB target
+
+Taking 32 MB as 30.5 MiB usable:
+
+- The largest still the streaming path can decode is about **14.7 MiB of
+  pixels, roughly 2270x2270 RGB**. The 3000x3000 photograph this project
+  benchmarks with does not fit, at 53.3 MiB. libpng decodes it in 26.9 MiB and
+  does fit.
+- Animation holds about **30 frames at the PSP's native 480x272 RGBA**. One
+  8-frame 1080p shot needs four times the entire budget.
+
+So the honest status of the target hardware is: the decoder fits in flash, and
+does not fit in RAM for anything above ~5 megapixels. Decoder size was the
+priority that was tracked; memory is the one that actually binds, and it was
+never measured until now.
+
+**The fix is not a format change.** Unfiltering needs only the previous row, so
+`filtered` does not have to be the whole image — a bounded ring buffer of a few
+rows, filled from `ZSTD_decompressStream`, would take the streaming path from
+2.07x to about 1.0x plus a constant, which is libpng's number. The same applies
+per frame in `apxl_decode`. This is decoder-side only, byte-identical output,
+no compatibility risk — the same class of change as the TU split that fixed
+decoder size. It is not implemented and not measured; the numbers above are the
+case for doing it.
