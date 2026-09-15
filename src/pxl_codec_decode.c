@@ -600,7 +600,11 @@ static int stream_emit_rows(pxl_stream* s)
         } else if (s->h.color_filter == PXL_FILTER_NONE) {
             memcpy(cur, in, s->row_stride);
         } else {
-            unpack_delta_row(in, cur, s->h.width, s->pixel_bytes);
+            /* filter_width, not width: for sub-8-bit images a row is the
+               packed byte count, which is smaller than the pixel width. Passing
+               the width here wrote past the row -- and past the buffer on the
+               last one. */
+            unpack_delta_row(in, cur, s->g.filter_width, s->pixel_bytes);
         }
 
         /* Check before the callback: the consumer will use these samples as
