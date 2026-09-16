@@ -1415,3 +1415,51 @@ Synthetic content repeats genuinely and cheaply at any level.
 decode speed, which is the property the format is sold on. It strengthens the
 case for the low default rather than weakening it — and it means "the level is
 free at read time" must never be stated without naming the content class.
+
+---
+
+## 2026-09-16 — correction: the cross-format speed figures were overstated
+
+The charts published earlier today compared throughput between decoders
+producing different numbers of channels. `bench/formatdec.c` derived the output
+volume as `width x height x 4`, which is right for libpng, JPEG XL, WebP and
+AVIF — each is explicitly asked for RGBA — and wrong for PXL, whose native path
+returns the image's own channel count. On 3-channel photographs that overstated
+PXL by 4/3; on 1-bit grayscale, by 32x, which is how it was caught: a WASM
+decode reported 34 900 MB/s.
+
+The `PXL-RGBA` row did not fix it either, because `pxl_image_expand` widens
+palettes and sub-byte depths but leaves an 8-bit RGB image alone.
+
+Both fixed: decoders now report the bytes they actually produced, and PXL pays
+for a genuine widening to RGBA exactly as libpng pays for the alpha it is told
+to add. On one Kodak image the old method would report 217 MB/s where the
+honest figure is 159.
+
+Re-measured, every decoder producing 8-bit RGBA:
+
+| photographs (24) | % of PNG | MB/s |
+|---|---:|---:|
+| PXL level 1 | 87.8 | 275.8 |
+| PXL level 19 | 85.6 | 226.7 |
+| PXL level 12 | 88.6 | 199.6 |
+| libpng | 100.0 | 98.6 |
+| WebP | 73.6 | 92.3 |
+| AVIF | 88.9 | 16.3 |
+| JXL | 65.8 | 5.2 |
+
+| synthetic stills (30) | % of PNG | MB/s |
+|---|---:|---:|
+| WebP | 44.6 | **570.2** |
+| PXL level 1 | 80.8 | 536.7 |
+| PXL level 19 | 50.3 | 485.0 |
+| PXL level 12 | 58.2 | 449.8 |
+| libpng | 100.0 | 308.7 |
+| AVIF | 165.5 | 85.4 |
+| JXL | 93.8 | 12.5 |
+
+**What changes.** PXL is about 2x libpng on photographs rather than 3.3x, and
+1.5x on synthetic stills rather than 4.8x. On synthetic content **WebP is both
+smaller and faster than PXL** — the earlier claim that PXL was the fastest
+codec measured holds only for photographs. AVIF's and JPEG XL's collapse on flat
+synthetic content is unaffected, since their figures were never wrong.

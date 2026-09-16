@@ -195,9 +195,9 @@ def plot_formats(label, rows, outdir):
     n = rows[0].get("files", "?")
     finish(fig, ax,
            "Size against decode speed: %s" % label,
-           "%s files, decoded in process to RGBA8888, single-threaded.\n"
-           "libjxl and libavif are given no worker threads, which is the target's "
-           "case and not a laptop's." % n,
+           "%s files, every decoder made to produce 8-bit RGBA, in process, "
+           "single-threaded.\nlibjxl and libavif are given no worker threads, "
+           "which is the target's case and not a laptop's." % n,
            os.path.join(outdir, "formats_%s.png" % label))
 
 

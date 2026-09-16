@@ -68,8 +68,12 @@ for f in "${files[@]}"; do
         [ -f "$tmp/l$lv.pxl" ] || continue
         while IFS=$'\t' read -r name ms mbs bytes; do
             [ "$name" = "decoder" ] && continue
-            [ "$name" = "PXL-RGBA" ] && continue
-            if [ "$name" = "PXL-native" ]; then
+            # The RGBA row is the comparable one: every other decoder here is
+            # asked for RGBA, and MB/s means nothing across outputs of
+            # different channel counts. PXL-native is dropped rather than
+            # plotted beside them.
+            [ "$name" = "PXL-native" ] && continue
+            if [ "$name" = "PXL-RGBA" ]; then
                 name="PXL-L$lv"
             elif [ "$first" != 1 ]; then
                 continue

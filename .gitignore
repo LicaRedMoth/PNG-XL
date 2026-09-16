@@ -57,3 +57,5 @@ pxl_interop_tmp.png
 # are committed (the charts are built from them); the logs are one machine's
 # transcript and go stale immediately.
 /bench/data/*.log
+# Built by wasm/build.sh from committed sources, like build/.
+/wasm/pxl.wasm

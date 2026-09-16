@@ -7,10 +7,10 @@ the pixels with a reversible colour transform, then compress with zstd.
 
 **What it is for.** Not the smallest files. JPEG XL and WebP both compress
 better and this project does not pretend otherwise. What PXL has is a decode
-profile nobody else offers at once: a decoder smaller than libpng's, decoding
-three to five times faster than libpng into raw pixels, in about the memory of
-the output image, a row at a time, with metadata carried through byte for byte.
-Every one of those is measured below.
+profile: a decoder smaller than libpng's, decoding roughly twice as fast into
+raw pixels, in about the memory of the output image, a row at a time, with
+metadata carried through byte for byte. Every one of those is measured below,
+including where WebP beats us on both axes.
 
 `libpxlcore` is PNG-free and depends on zstd alone, which is what lets the Qt
 image plugin, the Dolphin thumbnailer and the FFmpeg module in this repository
@@ -31,21 +31,26 @@ startup and writing an output file rather than decoding.
 Read them as: left is smaller, up is faster, so the useful corner is top-left.
 
 On **photographs** we are the fast one and not the small one. JPEG XL reaches
-65.8% of the source PNGs where we reach 85.6%, and decodes at 4.9 MB/s against
-our 199–327. libpng is at 100% and 84 MB/s.
+65.8% of the source PNGs where we reach 85.6%, and decodes at 5.2 MB/s against
+our 200–276. libpng is at 100% and 98.6 MB/s, so PXL is about twice its speed.
 
 On **synthetic stills** — interfaces, rendered text, diagrams, which is what a
-PNG replacement actually gets pointed at — the picture changes. PXL reaches
-50.3% at 1292 MB/s. WebP compresses better (44.6%) and decodes 40% slower.
-libpng, AVIF and JPEG XL are nowhere: AVIF comes out at **165%**, half again
-larger than the source PNG, and JPEG XL at 93.8%, because on very flat content
-that PNG already stores at 0.03 bytes per pixel their overhead exceeds what
-they win. On individual 4K screenshots with alpha, JPEG XL reaches 122% and 268%
-while PXL holds at 56–60%.
+PNG replacement actually gets pointed at — **WebP wins on both axes**: 44.6% of
+the source PNGs at 570 MB/s, against our 50.3% at 485. We are ahead of libpng
+(100% at 309) and that is the honest extent of it.
 
-One caveat that belongs with those numbers: every decoder here runs
-single-threaded, and libjxl and libavif are given no worker threads. That is the
-right comparison for this project's target and the wrong one for a desktop.
+What does collapse there is the other two. AVIF comes out at **165%**, half
+again larger than the source PNG, and JPEG XL at 93.8%, because on very flat
+content that PNG already stores at 0.03 bytes per pixel their overhead exceeds
+what they win. On individual 4K screenshots with alpha, JPEG XL reaches 122% and
+268% while PXL holds at 56–60%.
+
+Two caveats belong with those numbers. Every decoder runs single-threaded, and
+libjxl and libavif are given no worker threads — the right comparison for this
+project's target and the wrong one for a desktop. And every decoder, PXL
+included, is made to produce 8-bit RGBA, because throughput is not comparable
+between a three-channel output and a four-channel one; an earlier version of
+this chart did not do that and overstated PXL by about a third.
 
 ## Format philosophy
 
@@ -71,9 +76,10 @@ append-only measurement history is [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### Where each priority actually stands
 
-**Decode speed — met.** 3.3x libpng into raw pixels on photographs, 4.8x on
-synthetic stills, and the fastest of every lossless codec measured. QOI remains
-about 22% faster on photographs, and QOI does not compress.
+**Decode speed — met.** 2.0x libpng into RGBA on photographs at level 12 (2.8x
+at the default level 1), 1.5x on synthetic stills. Fastest of every lossless
+codec measured on photographs; on synthetic stills WebP is faster. QOI is faster
+still on photographs, and QOI does not compress.
 
 **Decoder size — met.** 174 KB of `.text` against libpng's 210 KB, and that
 counts all of libzstd statically while libpng's figure excludes the zlib it
