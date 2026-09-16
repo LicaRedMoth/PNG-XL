@@ -291,7 +291,7 @@ apxl_anim apng_load(const char* path)
         anim.canvas_w = canvas_w; anim.canvas_h = canvas_h;
         anim.channels = 4; anim.bytes_per_channel = 1;
         anim.loop_count = 0;
-        anim.metadata = pxl_meta_extract(file, file_size);
+        anim.metadata = pxl_meta_extract(file, file_size, 0);
         free(file);
         free(fctls);
         free(idat_default.data);
@@ -405,7 +405,7 @@ apxl_anim apng_load(const char* path)
        properties of the animation rather than of any one frame. Extracted from
        the original bytes for the same reason as in the still path: libpng only
        reports the chunks it knows. */
-    anim.metadata = pxl_meta_extract(file, file_size);
+    anim.metadata = pxl_meta_extract(file, file_size, 0);
 
     free(canvas); free(prevbuf); free(file);
     for (i = 0; i < fcount; ++i) { free(fctls[i].data.data); }

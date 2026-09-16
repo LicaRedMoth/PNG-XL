@@ -308,7 +308,21 @@ exactly what defeats a byte-oriented matcher.
 **Decision: rejected.** No packed sub-16-bit sample format. Note this also
 argues against ever packing 12-bit, for the same reason.
 
-**What would give 10-bit its actual value instead: keep `sBIT`.** PNG's
+**Done 2026-09-16: `sBIT` is kept.** It survives whenever the channel layout
+does — every image except one whose `tRNS` becomes a real alpha channel, where
+its per-channel entries would describe an image that no longer exists.
+Verified on the 49 PngSuite files that carry one, indexed and truecolour both,
+all 162 files still bit-exact.
+
+Fixing it surfaced an older bug. `pxl_meta_inject` placed every preserved chunk
+immediately before `IDAT`, which on an indexed image is *after* `PLTE` -- and
+`sBIT`, `gAMA`, `cHRM`, `sRGB` and `iCCP` must precede it. libpng read those
+files back, but ImageMagick had been warning "gAMA: out of place" on every
+indexed file this codec ever wrote, and nobody had followed the warning. The
+injector now writes two groups and the order comes out `IHDR gAMA sBIT PLTE
+IDAT`, with no warnings across the corpus.
+
+**The reasoning, kept:** PNG's
 significant-bits chunk is currently dropped along with `PLTE`, `tRNS`, `bKGD`
 and `hIST` as "pixel-layout dependent". For a 16-bit non-indexed image the
 layout is *not* changed, so `sBIT` stays valid and the blanket rule is too

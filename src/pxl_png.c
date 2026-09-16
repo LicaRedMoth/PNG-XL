@@ -110,9 +110,6 @@ pxl_image pxl_load_png(const char* path)
         return img;
     }
 
-    /* Preserve ancillary chunks (best-effort; empty on failure). */
-    img.metadata = pxl_meta_extract(file, file_size);
-
     png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     if (!png) { goto fail; }
     info = png_create_info_struct(png);
@@ -131,6 +128,15 @@ pxl_image pxl_load_png(const char* path)
     png_get_IHDR(png, info, &w, &h, &bit_depth, &color_type, NULL, NULL, NULL);
 
     indexed = (color_type == PNG_COLOR_TYPE_PALETTE);
+
+    /* Preserve ancillary chunks (best-effort; empty on failure). sBIT is kept
+       only when the channel layout survives: an indexed image keeps its palette,
+       and a non-indexed one keeps its channels unless tRNS is about to become a
+       real alpha channel, at which point sBIT's per-channel entries would
+       describe an image that no longer exists. */
+    img.metadata = pxl_meta_extract(
+        file, file_size,
+        indexed || !png_get_valid(png, info, PNG_INFO_tRNS));
 
     if (indexed) {
         /* Copy PLTE (and tRNS as per-entry alpha) out before any transform.

@@ -24,7 +24,8 @@
    that may be empty (data == NULL, size == 0 if nothing to preserve). On
    allocation failure returns {NULL, 0} as well; callers treat "no metadata"
    and "failure" identically (metadata is best-effort). */
-pxl_buffer pxl_meta_extract(const unsigned char* png_data, size_t png_size);
+pxl_buffer pxl_meta_extract(const unsigned char* png_data, size_t png_size,
+                            int keep_sbit);
 
 /* Given a PNG file produced by libpng in `base`, return a new PNG byte stream
    with the preserved chunks from `meta` inserted just before IDAT (or, for

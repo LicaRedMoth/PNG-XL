@@ -182,7 +182,14 @@ chunk. They are stored in the metadata block and re-inserted when decoding back
 to PNG. This holds for animation too: an `.apxl` carries one metadata block for
 the whole file.
 
-Chunks that describe the *original* pixel layout — `tRNS`, `sBIT`, `bKGD`,
+`sBIT` is kept whenever the channel layout survives — which is every image
+except one whose `tRNS` becomes a real alpha channel — because it is what tells
+a reader that a 16-bit file really carries 10 or 12 significant bits. Packing
+such samples instead was measured and rejected: bit-packed 10-bit compresses
+23% *worse* than the same data in 16-bit containers, since packing breaks the
+byte alignment a byte-oriented compressor depends on.
+
+Chunks that describe the *original* pixel layout — `tRNS`, `bKGD`,
 `hIST` — are intentionally **not** carried over, because PXL canonicalizes
 transparency into a real alpha channel, which would make those chunks invalid.
 Sub-8-bit grayscale is *not* canonicalized: it keeps its 1/2/4-bit depth, since

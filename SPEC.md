@@ -149,7 +149,7 @@ record := ChunkType[4] · DataLength[4, LE] · Data[DataLength]
 
 `PLTE` and `tRNS` are **not** stored here: for indexed images they are carried
 structurally in the palette section (section 2.3), which is what makes the
-indexed round-trip lossless. `sBIT`, `bKGD` and `hIST` are **not** stored,
+indexed round-trip lossless. `bKGD` and `hIST` are **not** stored,
 because they are tied to a pixel layout a front end may canonicalize.
 Structural chunks (`IHDR`, `IDAT`, `IEND`) are never stored.
 
