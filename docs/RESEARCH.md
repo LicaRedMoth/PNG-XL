@@ -265,7 +265,16 @@ indexed and grayscale images" — but `pxl_png.c` calls
 sub-byte gray has no colour type of its own there. The format can express it;
 the codec never produces it.
 
-Cost, measured on a 1200x1600 bilevel document, the same image offered both ways:
+**Fixed 2026-09-16.** The loader now keeps sub-byte grayscale packed and
+`pxl_save_png` writes it back as `PNG_COLOR_TYPE_GRAY` at its own depth.
+Grayscale carrying `tRNS` still expands, because the transparency becomes an
+alpha channel and there is no sub-byte alpha to hold it. On the same 1200x1600
+bilevel document: **1-bit in the file, 240 000 raw bytes against 1 920 000, the
+file 2746 bytes against 3567 (-23%), and decode peak 1.2 MiB against 4.3
+(3.6x)**. All 162 PngSuite files round-trip bit-exact, `ctest` and the 200 000
+iteration fuzz pass are clean under ASAN and UBSAN.
+
+The cost it used to carry, measured on that same document before the fix:
 
 | offered as | stored as | raw bytes | file | decode peak |
 |---|---|---:|---:|---:|

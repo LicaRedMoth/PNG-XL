@@ -137,10 +137,19 @@ pxl_image pxl_load_png(const char* path)
            No png_set_* expansion here: the indices are the pixel data. */
         if (!load_palette(png, info, &img)) { png_longjmp(png, 1); }
     } else {
-        if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
+        int has_trns = png_get_valid(png, info, PNG_INFO_tRNS);
+        /* Sub-byte grayscale stays packed. The container carries BitDepth
+           1/2/4 with Channels == 1, and expanding it to 8 bits costs eight
+           times the pixel buffer on exactly the content that uses it --
+           bilevel documents and scans, where decode memory is the binding
+           constraint on the target hardware.
+
+           tRNS is the one case that must still expand: it becomes a real
+           alpha channel, and there is no sub-byte alpha to put it in. */
+        if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8 && has_trns) {
             png_set_expand_gray_1_2_4_to_8(png);
         }
-        if (png_get_valid(png, info, PNG_INFO_tRNS)) {
+        if (has_trns) {
             png_set_tRNS_to_alpha(png);
         }
     }
@@ -159,6 +168,14 @@ pxl_image pxl_load_png(const char* path)
     if (indexed) {
         /* An index is a single sample, at most 8 bits deep. */
         if (channels != 1 || bit_depth > 8) { png_longjmp(png, 1); }
+        img.bit_depth = (uint8_t)bit_depth;
+    } else if (bit_depth < 8) {
+        /* Grayscale kept at its own depth. Only a single channel can be
+           sub-byte; anything that needed alpha was expanded above. */
+        if (channels != 1 ||
+            (bit_depth != 1 && bit_depth != 2 && bit_depth != 4)) {
+            png_longjmp(png, 1);
+        }
         img.bit_depth = (uint8_t)bit_depth;
     } else if ((bit_depth != 8 && bit_depth != 16) ||
                channels < 1 || channels > 4) {
@@ -243,8 +260,13 @@ int pxl_save_png(const char* path, const pxl_image* img)
         if (pal_count == 0 || pal_count > (1u << depth)) { return 0; }
         if (img->palette_alpha.size > pal_count) { return 0; }
         color_type = PNG_COLOR_TYPE_PALETTE;
+    } else if (depth == 1 || depth == 2 || depth == 4) {
+        /* Sub-byte grayscale: PNG has a colour type for it, so write it back
+           at its own depth instead of expanding. One channel only -- there is
+           no sub-byte alpha. */
+        if (img->channels != 1 || img->bytes_per_channel != 1) { return 0; }
+        color_type = PNG_COLOR_TYPE_GRAY;
     } else if (depth != 8 && depth != 16) {
-        /* Sub-byte gray has no color_type of its own here; expand first. */
         return 0;
     } else switch (img->channels) {
         case 1: color_type = PNG_COLOR_TYPE_GRAY;       break;
