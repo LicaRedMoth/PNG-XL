@@ -900,3 +900,40 @@ One structural point while regenerating: the still-image decode column times
 reports is libpng's deflate rather than PXL's decoder. The README explains this
 in prose underneath, which is the wrong fix — `bench/rawdec` already measures
 decode without the re-encode and should be the primary number.
+
+### Security audit before freeze — two 32-bit overflow OOB reads, fixed
+**Done 2026-09-16.** A pass over every entry point that takes untrusted bytes
+(`pxl_decode`, the streaming decoder, `apxl_decode`, `pxl_meta_extract`/`inject`,
+`apng_load`), run against a **32-bit ASAN build** because the stated target is a
+32-bit platform and every bug here is invisible at 64.
+
+**Bug 1 — chunk-length bounds, 6 sites** in `pxl_meta.c` and `apng.c`. The
+pattern was `offset + (size_t)len + 4 > size`, with `len` an attacker-controlled
+uint32 up to 0xFFFFFFFF. On a 32-bit `size_t` the left side wraps and passes,
+after which the walker copies `len` bytes. A PNG chunk claiming 4 GB inside a
+64-byte buffer produced an AddressSanitizer negative-size-param in `bb_append`.
+Rewritten as subtraction from the known size. The telling part: `apng_load`
+already guarded its *canvas allocation* against this exact wrap, with comments
+naming the 32-bit hazard, while the chunk walk in the same function did not —
+allocation sizes were hardened, iteration bounds were not.
+
+**Bug 2 — `apxl_decode` frame-count check.** `canvas_bytes * frame_count` was a
+`size_t` multiply; an 8192x8192x4 canvas with 16 frames makes it exactly 2^32,
+which is 0 at 32 bits, matching a declared `raw_byte_count` of 0. The check
+passed and the decoder returned 16 frame pointers spaced 2^28 apart into a
+zero-byte buffer, each advertising `buffer.size == 2^28`. A consumer reading the
+last frame took a SEGV under 32-bit ASAN. Fixed by doing the multiply in
+`uint64_t`; since `raw_byte_count` is a uint32, a match proves the real total is
+below 2^32 and the offsets stay in bounds.
+
+**What was checked and found clean:** `pxl_geometry_of`/`pxl_row_bytes_of`
+(64-bit intermediate with an explicit SIZE_MAX guard), the APNG compositing
+rectangle (`(uint64_t)x + w > canvas_w`), the still-header offset checks (already
+subtraction-form), and 3M decode-fuzz plus 700k metadata-fuzz iterations under
+ASAN and UBSAN on both word sizes.
+
+**Lasting note:** every survivor and every bug came down to one rule — validate
+a file-supplied length by *subtracting from the known size*, never by adding to
+an offset. On this project's 32-bit target that is a correctness rule, not a
+style preference. `tests/fuzz_meta.c` was added because the metadata paths, where
+bug 1 lived, had no fuzz coverage at all.

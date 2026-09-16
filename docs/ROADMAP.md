@@ -34,10 +34,13 @@ with the measurement recorded so it need not be repeated. See
 
 ### Then freeze
 
-The format is pre-release with no outside users, so the specification can still
-change without a version bump. That window closes at release, which makes the
-two items above cheap now and expensive later. The audit of what the container
-carries is done and recorded.
+Both pre-freeze items are done: `sBIT` is kept, and `bench/encstages` is
+written up. A security audit of the untrusted-input paths (2026-09-16) found and
+fixed two 32-bit integer-overflow OOB reads and is recorded in
+[`RESEARCH.md`](RESEARCH.md); the pixel-format audit is done. What remains before
+freezing is a decision to freeze — the format is pre-release with no outside
+users, so the spec can still change without a version bump, and that window
+closes at release.
 
 ## Next
 
