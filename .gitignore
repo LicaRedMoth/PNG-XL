@@ -60,3 +60,5 @@ pxl_interop_tmp.png
 /bench/data/*.log
 # Built by wasm/build.sh from committed sources, like build/.
 /wasm/pxl.wasm
+# Built by psp/build.sh from committed sources, same as build/ and wasm/pxl.wasm.
+/psp/build/

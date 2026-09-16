@@ -189,6 +189,17 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Generates psp/testdata.h: one valid .pxl file per color filter, forced (not
+# chosen by the encoder) so the PSP smoke test can exercise all four, plus the
+# known-correct pixels to check the on-device decode against. Host tool only --
+# never runs on the PSP itself. See bench/mkpsptest.c and psp/README.md.
+add_executable(pxl_bench_mkpsptest bench/mkpsptest.c src/pxl_codec_common.c src/pxl_io.c)
+target_include_directories(pxl_bench_mkpsptest PRIVATE src)
+target_link_libraries(pxl_bench_mkpsptest PRIVATE ${PXL_ZSTD_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_mkpsptest PRIVATE ${PXL_ZSTD_INCLUDE})
+endif()
+
 # Whether overlapping zstd decompression with unfiltering on a second thread
 # beats doing them back to back. Includes the codec units directly for the same
 # reason pxl_bench_stages does: unfilter_row and decode_rows_bounded are static.

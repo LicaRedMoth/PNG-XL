@@ -78,6 +78,17 @@ now decodes in roughly the size of its output, but **no number in this project
 was ever taken on the hardware it is aimed at**, and throughput is the one
 figure that cannot be derived from the x86 runs.
 
+**Done 2026-09-16, as far as it can be without the console**: the decoder
+cross-compiles for MIPS with `psp-gcc`/PSPSDK unchanged, and decodes every
+filter bit-exact under `PPSSPPHeadless` — see [`psp/README.md`](../psp/README.md).
+That closes the code-risk side of this item (does it even build and run on the
+real target) but not the measurement itself: an emulator's timing is the
+emulator's own JIT speed, not the 222/333 MHz Allegrex core, and this project
+has already published two numbers that were plausible and wrong from measuring
+an adjacent thing by mistake (see `RESEARCH.md`) — an emulator figure reported
+as hardware would be a third. What's left is purely "get a PSP in hand and run
+`psp/build.sh` + copy `EBOOT.PBP` over" — no further code work blocks it.
+
 What to measure, on the console: decode throughput in MB/s at both 222 and
 333 MHz, for a 480x272 RGBA8888 screen (522 KB) and a 512x512 texture (1 MB),
 split by filter. The split matters because the filters differ enormously here —
