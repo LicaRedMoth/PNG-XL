@@ -211,7 +211,11 @@ apxl_anim apng_load(const char* path)
         uint32_t len = pxl_get_be32(file + pos);
         const unsigned char* type = file + pos + 4;
         const unsigned char* data = file + pos + 8;
-        if ((size_t)pos + 12 + len > file_size) { break; }
+        /* Subtraction, not addition: `len` is from the file and reaches
+           0xFFFFFFFF, which wraps a 32-bit size_t and passes this check.
+           See the note in pxl_meta.c. */
+        if ((size_t)pos > file_size || file_size - (size_t)pos < 12 ||
+            (size_t)len > file_size - (size_t)pos - 12) { break; }
 
         if (memcmp(type, "IHDR", 4) == 0 && len >= 13) {
             memcpy(ihdr, data, 13);
@@ -475,7 +479,8 @@ static int encode_frame_idat(const uint8_t* rgba, uint32_t w, uint32_t h,
     while (pos + 8 <= writer.size) {
         uint32_t len = pxl_get_be32(writer.data + pos);
         const unsigned char* type = writer.data + pos + 4;
-        if (pos + 12 + len > writer.size) { break; }
+        if (pos > writer.size || writer.size - pos < 12 ||
+            (size_t)len > writer.size - pos - 12) { break; }
         if (memcmp(type, "IDAT", 4) == 0) {
             gb_put(&idat, writer.data + pos + 8, len);
         } else if (memcmp(type, "IEND", 4) == 0) {
@@ -518,7 +523,9 @@ int apng_save(const char* path, const apxl_anim* anim)
         size_t mpos = 0;
         while (mpos + 8 <= anim->metadata.size) {
             uint32_t mlen = pxl_get_le32(m + mpos + 4);
-            if (mpos + 8 + (size_t)mlen > anim->metadata.size) {
+            if (mpos > anim->metadata.size ||
+                anim->metadata.size - mpos < 8 ||
+                (size_t)mlen > anim->metadata.size - mpos - 8) {
                 break;  /* truncated record: stop, keep what we have */
             }
             gb_chunk(&g, (const char*)(m + mpos), m + mpos + 8, mlen);

@@ -193,9 +193,18 @@ apxl_anim apxl_decode(pxl_buffer file)
     if (!file.data || !apxl_header_read(file.data, file.size, &fh)) { return anim; }
 
     pb = (unsigned)fh.channels * fh.bytes_per_channel;
+    /* canvas_w*canvas_h is bounded by APXL_MAX_PIXELS in apxl_header_read, so
+       this product is at most 2^28 * 8 and fits size_t even at 32 bits. */
     canvas_bytes = (size_t)fh.canvas_w * fh.canvas_h * pb;
+    /* But canvas_bytes * frame_count can reach ~2^51, which wraps a 32-bit
+       size_t -- the target platform. A crafted 8192x8192x4 / 16-frame header
+       made the product 2^32, i.e. 0, matching raw_byte_count = 0; the check
+       passed and the frame loop then handed back pointers 2^28 apart into a
+       zero-byte buffer. Do the multiply in 64 bits. raw_byte_count is a uint32,
+       so a match guarantees the true total is below 2^32 and every frame offset
+       used below stays in bounds. Confirmed with a 32-bit ASAN build. */
     if (canvas_bytes == 0 ||
-        (size_t)fh.raw_byte_count != canvas_bytes * fh.frame_count) {
+        (uint64_t)canvas_bytes * fh.frame_count != (uint64_t)fh.raw_byte_count) {
         return anim;
     }
 

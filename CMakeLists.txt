@@ -298,6 +298,14 @@ target_link_libraries(pxl_fuzz_decode PRIVATE pxlcore_static)
 # Keep the in-suite run short; raise the iteration count for a longer soak.
 add_test(NAME fuzz_decode COMMAND pxl_fuzz_decode 20000)
 
+# Metadata paths are attacker-controlled too (chunk lengths from the file) and
+# the decoder fuzzer never reaches them. Needs the full lib for pxl_meta and
+# zlib's crc32. This is where the 32-bit chunk-length overflow was found.
+add_executable(pxl_fuzz_meta tests/fuzz_meta.c)
+target_link_libraries(pxl_fuzz_meta PRIVATE pxl_static ${PXL_ZLIB_TARGET})
+target_include_directories(pxl_fuzz_meta PRIVATE src)
+add_test(NAME fuzz_meta COMMAND pxl_fuzz_meta 20000)
+
 install(TARGETS pxl pxl_static pxlcore pxlcore_static pxltool
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib

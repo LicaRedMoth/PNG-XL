@@ -114,8 +114,12 @@ pxl_buffer pxl_meta_extract(const unsigned char* png, size_t size, int keep_sbit
         const unsigned char* type = png + pos + 4;
         size_t data_off = pos + 8;
 
-        /* Bounds: data + 4-byte CRC must fit. */
-        if (data_off + (size_t)len + 4 > size) {
+        /* Bounds: data + 4-byte CRC must fit. Written as a subtraction because
+           `len` is attacker-controlled up to 0xFFFFFFFF, and on a 32-bit size_t
+           -- the target platform -- `data_off + len + 4` wraps and passes.
+           Confirmed under a 32-bit ASAN build before it was written this way. */
+        if (data_off > size || size - data_off < 4 ||
+            (size_t)len > size - data_off - 4) {
             break;
         }
 
@@ -157,7 +161,9 @@ static void emit_meta(bytebuf* bb, const unsigned char* meta, size_t meta_size,
         unsigned char lenbe[4];
         uLong crc;
 
-        if (mpos + 8 + (size_t)mlen > meta_size) {
+        /* Subtraction, not addition: see pxl_meta_extract. */
+        if (mpos > meta_size || meta_size - mpos < 8 ||
+            (size_t)mlen > meta_size - mpos - 8) {
             break; /* corrupt metadata; stop */
         }
         if (must_precede_plte(mtype) == early) {
@@ -198,11 +204,14 @@ pxl_buffer pxl_meta_inject(const unsigned char* base, size_t base_size,
     while (pos + 8 <= base_size) {
         uint32_t len = pxl_get_be32(base + pos);
         const unsigned char* type = base + pos + 4;
-        size_t chunk_len = 8 + (size_t)len + 4;
+        size_t chunk_len;
 
-        if (pos + chunk_len > base_size) {
+        /* Subtraction, not addition: see pxl_meta_extract. */
+        if (pos > base_size || base_size - pos < 12 ||
+            (size_t)len > base_size - pos - 12) {
             break;
         }
+        chunk_len = 8 + (size_t)len + 4;
 
         /* Preserved chunks go in two groups: those the spec requires before
            PLTE go at the first PLTE (or the first IDAT when there is none),
