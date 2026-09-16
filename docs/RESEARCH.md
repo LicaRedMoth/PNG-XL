@@ -258,7 +258,7 @@ So **sub-8-bit with alpha does exist** — through the palette, which is also th
 only way PNG expresses it. PNG has the same restriction we do: no gray+alpha
 below 8 bits.
 
-### Sub-8-bit grayscale is expanded to 8-bit, and it need not be
+### Sub-8-bit grayscale was expanded to 8-bit — fixed 2026-09-16
 **The container allows it** — SPEC 2.1 says depths 1/2/4 are meaningful "for
 indexed and grayscale images" — but `pxl_png.c` calls
 `png_set_expand_gray_1_2_4_to_8` on load, and the writer says outright that
@@ -404,7 +404,7 @@ choice for a reason that was not known when it was made: on photographs a higher
 level costs decode speed as well as encode time.
 
 
-### Decoder size — priority not met
+### Decoder size — was not met, met since 2026-09-15
 **Problem:** the built PXL decoder is 861 KB against 209 KB for libpng+zlib
 (measurement 2). Our own code is only 19 KB, everything else is libzstd, and
 the compressor (570 KB) gets pulled into the binary too, which the decoder does
@@ -446,7 +446,7 @@ measurements; they just no longer need this one.
 plus a full-image pixel buffer. That, not `.text`, is now the open question for
 the target hardware.
 
-### Decode-time memory — the priority that actually binds
+### Decode-time memory — the priority that actually binds (fixed 2026-09-15)
 **Measured 2026-09-15, same day as the entry above and directly out of it.**
 Peak RSS of minimal decoders; numbers and method in [BENCHMARKS.md](BENCHMARKS.md).
 
