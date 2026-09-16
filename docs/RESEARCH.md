@@ -183,6 +183,45 @@ so reasonable that it will be proposed again.
 
 ## Rejected ideas
 
+### Probing filters at a cheap zstd level — rejected as a default
+**Measured 2026-09-16**, closing a question the tool `bench/encstages.c` had
+been sitting in the tree to answer since before 2026-09-15.
+
+**The idea.** `pxl_encode_ex` compresses all four filter candidates at the
+requested level and keeps the smallest, so a level-12 encode pays for four
+level-12 compressions and discards three. If a cheap level ranked the candidates
+identically, the encoder could rank cheaply and compress the winner once, and
+the file would come out **byte-identical** at a fraction of the encode cost.
+
+**Result: the ranking does not survive the cheap level.** At probe level 1 the
+winner differs on 4-13% of files depending on corpus, costing 1.33% of total
+size on PngSuite and up to 4.4% on individual files. Numbers per corpus and
+per strategy in [BENCHMARKS.md](BENCHMARKS.md).
+
+Compressing the probe's *two* best at full level recovers almost all of it —
+exact on Kodak and on synthetic stills at probe 3, 0.120% off on PngSuite — but
+only speeds encoding by 1.09x to 1.37x, since two full compressions out of four
+is most of the work.
+
+**Decision: not adopted as the default.** The honest trade is 1.5-2.3x encode
+speed for 0.06-0.35% of size, and that is the wrong way round for this project:
+**encode speed is not among the four priorities and file size is**, last but
+present. Trading a stated priority for an unstated one needs a better rate than
+this.
+
+**Left open as a possible opt-in.** The output stays a valid `.pxl` either way,
+so a `PXL_ENCODE_FAST` flag costs the format nothing and would suit a batch
+conversion of thousands of files, where 2x wall time matters and 0.1% of size
+does not. Not implemented; recorded so the measurement does not have to be
+repeated to justify it.
+
+**A note on what the tool was for.** `bench/encstages.c` also breaks encode time
+into the filter stage and the zstd stage, and the split is worth knowing on its
+own: on a Kodak photograph, filtering is 0.2-27 ms against 150-300 ms of zstd,
+so encode cost is the compressor almost entirely. Speeding up the filters, which
+is where the obvious optimisations live, would move nothing.
+
+
 ### Motion vectors (MOVE) for animation — rejected on measurement
 **Why it was proposed:** video codecs get their compression from COPY, MOVE and
 RESIDUAL, and APXL has no notion of a displaced copy.

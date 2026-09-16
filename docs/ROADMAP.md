@@ -23,13 +23,14 @@ a reader learns the range is 10-bit — without a packed sample format, which wa
 measured and rejected because it compresses 23% *worse*. Metadata only; the
 decoder never looks at it. See [`RESEARCH.md`](RESEARCH.md).
 
-### Write up `bench/encstages`
+### Done — `bench/encstages` is written up
 
-The tool has been in the tree since before 2026-09-15 and answers whether a
-cheap probe level ranks filter candidates the way the full level does — if it
-does, the encoder can probe cheaply and compress the winner once, with
-byte-identical output. It builds, it runs, and its answer was never recorded as
-a decision. That write-up, not another run, is the work.
+Answered 2026-09-16 and rejected as a default: the cheap probe does *not* rank
+the candidates the way the full level does, disagreeing on 4-13% of files, so
+the byte-identical output the idea rested on is not available. The closest safe
+variant buys only 1.09-1.37x. Left open as a possible `PXL_ENCODE_FAST` opt-in,
+with the measurement recorded so it need not be repeated. See
+[`RESEARCH.md`](RESEARCH.md).
 
 ### Then freeze
 

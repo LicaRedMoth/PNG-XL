@@ -1463,3 +1463,42 @@ Re-measured, every decoder producing 8-bit RGBA:
 smaller and faster than PXL** — the earlier claim that PXL was the fastest
 codec measured holds only for photographs. AVIF's and JPEG XL's collapse on flat
 synthetic content is unaffected, since their figures were never wrong.
+
+---
+
+## 2026-09-16 — does a cheap probe level rank the filters like the full one?
+
+- **Tool:** `bench/encstages.c`, driven over corpora by `bench/probesweep.sh`
+- **Question:** `pxl_encode_ex` compresses every filter candidate at the
+  requested level to find the smallest, throwing three results away. If a cheap
+  level ranked them the same way, the encoder could compare cheaply and compress
+  the winner once — for byte-identical output.
+- **What is reported:** agreement alone decides nothing. A strategy that agrees
+  95% of the time and loses 10% on the rest is worse than one that agrees less
+  and loses nothing, so the size penalty is measured against the filter the full
+  search would really have chosen.
+
+Full level 12 throughout. *top-1* compresses only the probe's winner; *top-2*
+compresses the probe's best two at full level and keeps the smaller.
+
+| probe | corpus | files | top-1 agree | top-1 penalty | top-1 speed | top-2 agree | top-2 penalty | top-2 speed |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | Kodak | 24 | 95.8% | 0.064% | 2.64x | 95.8% | 0.064% | 1.50x |
+| 1 | PngSuite | 158 | 86.7% | 1.329% | 2.37x | 97.5% | 0.134% | 1.49x |
+| 1 | synthetic | 40 | 92.5% | 0.762% | 1.62x | **100%** | **0.000%** | 1.24x |
+| 3 | Kodak | 24 | 95.8% | 0.064% | 1.99x | **100%** | **0.000%** | 1.28x |
+| 3 | PngSuite | 158 | 91.1% | 0.345% | 2.26x | 98.1% | 0.120% | 1.37x |
+| 3 | synthetic | 40 | 95.0% | 0.337% | 1.51x | **100%** | **0.000%** | 1.09x |
+
+**The premise does not hold.** A probe level does not rank the candidates the
+way the full level does: at probe 1 it disagrees on 4-13% of files, and on
+PngSuite that costs 1.33% of the corpus and up to 4.4% on a single file. The
+"byte-identical output for free" the idea was proposed on is not available.
+
+**What comes closest is probe 3 with top-2**, which is exact on Kodak and on
+synthetic stills and loses 0.120% on PngSuite — but buys only 1.09x to 1.37x,
+because compressing two candidates at full level is most of the work of
+compressing four.
+
+**The trade that is actually on offer** is probe 3 with top-1: 1.5x to 2.3x
+encode speed for 0.06% to 0.35% of size, varying by content.
