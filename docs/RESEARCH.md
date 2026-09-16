@@ -240,6 +240,85 @@ already loses to libpng by a factor of four.
 
 ## Open questions and confirmed problems
 
+### Pre-freeze audit of pixel formats — what the container actually carries
+**Measured 2026-09-16**, before freezing the specification. Eighteen
+combinations encoded and decoded back, compared against the source with
+`magick compare -metric AE`: **every one is 0**.
+
+Preserved in their source form, sub-byte depths included:
+
+| source | stored as |
+|---|---|
+| indexed 1 / 2 / 4 / 8-bit | same depth, palette section |
+| indexed 2-bit with per-index alpha (`tm3n3p02`) | 2-bit, palette + alpha |
+| indexed 8-bit with alpha (`tbbn3p08`) | 8-bit, palette + alpha |
+| gray / gray+alpha / RGB / RGBA at 8 and 16 bit | unchanged |
+
+So **sub-8-bit with alpha does exist** — through the palette, which is also the
+only way PNG expresses it. PNG has the same restriction we do: no gray+alpha
+below 8 bits.
+
+### Sub-8-bit grayscale is expanded to 8-bit, and it need not be
+**The container allows it** — SPEC 2.1 says depths 1/2/4 are meaningful "for
+indexed and grayscale images" — but `pxl_png.c` calls
+`png_set_expand_gray_1_2_4_to_8` on load, and the writer says outright that
+sub-byte gray has no colour type of its own there. The format can express it;
+the codec never produces it.
+
+Cost, measured on a 1200x1600 bilevel document, the same image offered both ways:
+
+| offered as | stored as | raw bytes | file | decode peak |
+|---|---|---:|---:|---:|
+| 1-bit grayscale | expanded to 8-bit | 1 920 000 | 3567 | **4.3 MiB** |
+| 2-bit indexed | kept at 2-bit | 480 000 | **2849** | **1.5 MiB** |
+
+20% of file size and **2.9x of decode memory**, and memory is the priority that
+binds on the target. This is an implementation gap rather than a format change:
+loading must stop expanding, and `pxl_save_png` must learn to emit
+`PNG_COLOR_TYPE_GRAY` at depths 1/2/4.
+
+### 10-bit as a packed sample format — rejected on measurement
+**Why it was raised:** HDR delivery is 10-bit, `BitDepth` has no such value, and
+storing 10-bit data in 16-bit containers looks like throwing away six bits per
+sample.
+
+**Result: packing would make files bigger.** The same 10-bit content, 1.89M
+samples, `zstd -12`:
+
+| layout | raw bytes | compressed |
+|---|---:|---:|
+| 16-bit containers, six bits unused (what happens today) | 3 780 000 | **1 684 088** |
+| packed 10-bit, four samples per five bytes | 2 362 500 | **2 078 119** |
+
+37.5% less raw data compresses to 23% *more*. In the padded layout every sample
+occupies a fixed two-byte slot, so the unused bits sit in predictable places and
+zstd models them away. Packed, sample boundaries wander across bytes and the
+same value produces different byte patterns depending on its position, which is
+exactly what defeats a byte-oriented matcher.
+
+**Decision: rejected.** No packed sub-16-bit sample format. Note this also
+argues against ever packing 12-bit, for the same reason.
+
+**What would give 10-bit its actual value instead: keep `sBIT`.** PNG's
+significant-bits chunk is currently dropped along with `PLTE`, `tRNS`, `bKGD`
+and `hIST` as "pixel-layout dependent". For a 16-bit non-indexed image the
+layout is *not* changed, so `sBIT` stays valid and the blanket rule is too
+broad. Preserving it tells a reader the range is 10-bit at the cost of a
+metadata chunk the decoder never looks at — all of the benefit, none of the
+format change. Open.
+
+**Not pursued, and deliberately:** float samples (rendering and compositing, not
+delivery; needs float arithmetic the target lacks), CMYK and >4 channels,
+progressive-by-resolution, and region decode. Each costs specification weight
+and decoder size, which are priorities 2 and 3. Note also that "24-bit" in
+imaging means 8 bits x 3 channels, which the format has always had; there is no
+24-bit-per-channel format in use anywhere.
+
+**Context for all of the above:** the format is pre-release with no outside
+users, so the specification can still change without a version bump. That
+window closes at release.
+
+
 ### Tuning zstd beyond the level — nothing there
 **Why it was proposed:** `pxl_codec_encode.c` calls
 `ZSTD_compress(dst, cap, src, size, level)` with a level and nothing else, and
