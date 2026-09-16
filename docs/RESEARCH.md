@@ -258,6 +258,40 @@ byte-identical on icons and 99.9% on large images. Numbers in
 data; there is no configuration off that curve worth carrying. Do not reopen
 without a specific mechanism in mind rather than a parameter sweep.
 
+### The zstd level is not monotonic on BCIF-filtered photographs
+**Found 2026-09-15**, when the corpus table first carried a level-1 row next to
+level 12 and level 1 came out *smaller*: 87.7% of PNG against 88.4%.
+
+Not an encoder bug. Split by class, PngSuite (162 tiny files) behaves as
+expected — level 12 is 89.2% of level 1 — while Kodak (24 photographs) has
+level 12 at **100.9% of level 1**. Holding the filter fixed on one Kodak image
+isolates it to zstd itself:
+
+| level | BCIF-filtered bytes | adaptive-filtered |
+|---|---:|---:|
+| 1 | 600 171 | 807 487 |
+| 6 | **609 440** | - |
+| 12 | **603 664** | 725 327 |
+| 19 | 597 356 | - |
+
+Levels 6 and 12 are *worse than level 1* on the same BCIF stream, and only 19
+recovers. The adaptive stream on the same image improves monotonically, so this
+is specific to what BCIF produces: a plane-split, decorrelated stream that is
+close to noise, where zstd's stronger match finders spend more on sequences than
+they recover.
+
+**Consequences.** Kodak carries 13.5 MB against PngSuite's 88 KB, so this one
+class drives the whole corpus aggregate — which is why the committed-corpus
+table appears to say the default level beats level 12 for everything. It does
+not; it says photographs are a special case.
+
+**Open.** The encoder picks the smallest filter *at the requested level*, which
+is correct and is not affected. But it exposes that the level itself is a knob
+the encoder trusts to be monotonic and which is not, at least for one filter on
+one content class. Trying two levels and keeping the smaller would fix it at
+double the encode cost; whether that is worth it is unmeasured, and it should
+not be decided before the level curves from tonight's sweep are plotted.
+
 ### The still-image default level is 1, and every published number is level 12
 **Found 2026-09-15 while measuring the level curve.** `PXL_LEVEL_DEFAULT` is 1
 for stills (`src/pxl.h`), 12 for animation. `pxltool c` with no `-l` therefore
@@ -265,16 +299,21 @@ produces output that is 107% of level 12 on icons, 117% on small screenshots and
 **144% on large ones** — while the README, the corpus tables and every research
 entry quote level 12.
 
-The level is a pure encode-time trade: decode throughput measured flat from
-level 1 to 19 (784-857 MB/s, the spread being noise), so a higher default costs
-nothing at read time and nothing in the decoder. Against that, encoding a large
+The level is *not* a pure encode-time trade, though it looked like one at
+first: decode throughput measured flat from level 1 to 19 on synthetic content,
+but re-measured in process on photographs, zstd decompression is three times
+slower at level 19 than at level 1 (3.57 ms against 10.42 ms on one Kodak
+image, unfilter unchanged). The first measurement used the zstd CLI, where
+startup and I/O masked it. See the 2026-09-16 correction in BENCHMARKS.md. Against that, encoding a large
 image goes from 1.11s to 11.97s between level 12 and 19, which is real for a
 batch conversion.
 
-**Open, and it is a product decision rather than a measurement:** either the
-default rises to match what the project claims, or every claim acquires an
-"at `-l 12`" qualifier. The present state — shipping 1 and publishing 12 — is
-the one option that is not defensible.
+**Resolved 2026-09-16: the default stays at 1, and the tables carry every
+level.** `bench/bench.sh` and `bench/corpus.sh` take `PXL_LEVELS` and emit one
+row per level with the default marked, so the comparison is in front of the
+reader instead of hidden behind a qualifier. The correction above supports the
+choice for a reason that was not known when it was made: on photographs a higher
+level costs decode speed as well as encode time.
 
 
 ### Decoder size — priority not met

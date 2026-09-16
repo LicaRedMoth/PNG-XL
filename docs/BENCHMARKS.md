@@ -1382,3 +1382,36 @@ Which makes the still-image default hard to defend: `PXL_LEVEL_DEFAULT` is **1**
 and on large content that is 143.9% of level 12 — 44% larger — in exchange for
 encode time that a one-off conversion pays once. Every published figure for this
 format is measured at level 12.
+
+---
+
+## 2026-09-16 — correction: the level's decode cost depends on the content
+
+The entry above concluded that "decode speed is flat across levels" and that the
+level is therefore a pure encode-time trade. **That holds for synthetic content
+and is wrong for photographs.** The earlier figure was taken with the `zstd` CLI
+over screenshot streams, where process startup and pipe I/O are a large part of
+each measurement — the same contamination this project already caught once in
+README's decode column.
+
+Re-measured in process with `bench/stages.c`, which separates zstd from
+unfiltering:
+
+| content | filter | L1 zstd | L12 zstd | L19 zstd | L1→L19 bytes |
+|---|---|---:|---:|---:|---|
+| screenshot 1894x989 | none | 5.78 ms | 5.68 ms | 6.14 ms | 285 820 → 193 036 |
+| Kodak photograph | none | 3.57 ms | 6.93 ms | **10.42 ms** | 991 061 → 653 244 |
+
+On the photograph, decompression is **three times slower at level 19 than at
+level 1** while producing a third less data. On the screenshot it is flat. The
+unfilter stage does not move in either case, so this is zstd, not our code.
+
+The mechanism fits the content: photographic residue after filtering is close to
+noise, so the stronger match finders earn their bytes from rare long-distance
+matches, and decoding those means copies that reach far back and miss cache.
+Synthetic content repeats genuinely and cheaply at any level.
+
+**What this changes.** Raising the level on photographs costs encode time *and*
+decode speed, which is the property the format is sold on. It strengthens the
+case for the low default rather than weakening it — and it means "the level is
+free at read time" must never be stated without naming the content class.

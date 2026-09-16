@@ -207,6 +207,24 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_encstages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Cross-format decode speed, in process, every format to the same RGBA8888
+# destination. Optional: only built when libjxl, libwebp and libavif are found,
+# since timing their CLI tools instead would measure process startup and file
+# writing rather than decoding.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(FMTDEC QUIET libjxl libwebp libavif)
+endif()
+if(FMTDEC_FOUND)
+    add_executable(pxl_bench_formatdec bench/formatdec.c)
+    target_include_directories(pxl_bench_formatdec PRIVATE src ${FMTDEC_INCLUDE_DIRS})
+    target_link_libraries(pxl_bench_formatdec PRIVATE
+                          pxlcore ${FMTDEC_LIBRARIES} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+    target_link_directories(pxl_bench_formatdec PRIVATE ${FMTDEC_LIBRARY_DIRS})
+else()
+    message(STATUS "libjxl/libwebp/libavif not found: skipping pxl_bench_formatdec")
+endif()
+
 # Dumps the filtered stream the encoder feeds to zstd, so a dictionary can be
 # trained on the right material. Includes pxl_codec_encode.c directly because
 # apply_filter is static, same as pxl_bench_stages.
