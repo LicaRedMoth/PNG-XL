@@ -81,9 +81,14 @@ def load_level_files():
     """
     out = {}
     for path in sorted(glob.glob(os.path.join(DATA, "levels_*.tsv"))):
+        # Only real sweeps: bench/levelsweep.sh records how many files it
+        # encoded, and a hand-seeded file records zero. Mixing the two once put
+        # raw-zstd-on-a-filtered-stream timings on the same time axis as a full
+        # pxltool encode, which measures entirely different work.
         label = re.sub(r"^levels_|\.tsv$", "", os.path.basename(path))
         with open(path, newline="", encoding="utf-8") as fh:
-            rows = [r for r in csv.DictReader(fh, delimiter="\t") if r.get("level")]
+            rows = [r for r in csv.DictReader(fh, delimiter="\t")
+                    if r.get("level") and int(r.get("files") or 0) > 0]
         if rows:
             out[label] = rows
     return out
