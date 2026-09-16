@@ -189,6 +189,25 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Whether overlapping zstd decompression with unfiltering on a second thread
+# beats doing them back to back. Includes the codec units directly for the same
+# reason pxl_bench_stages does: unfilter_row and decode_rows_bounded are static.
+add_executable(pxl_bench_pipeline bench/pipeline.c
+                                  src/pxl_codec_common.c
+                                  src/pxl_png.c
+                                  src/pxl_pngio.c
+                                  src/pxl_meta.c
+                                  src/pxl_io.c)
+target_include_directories(pxl_bench_pipeline PRIVATE src)
+find_package(Threads REQUIRED)
+target_link_libraries(pxl_bench_pipeline PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET}
+                      Threads::Threads)
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_pipeline PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_pipeline PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 # Where encode time goes (filtering vs zstd, per candidate filter), and whether
 # a cheap probe level ranks the candidates the same way the full level does.
 # Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:

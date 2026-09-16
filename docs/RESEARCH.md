@@ -258,6 +258,69 @@ nowhere in the previous frame. Residual coding, not motion, is where an
 animation's bytes are — and unlike MOVE that is an open question.
 
 
+### A two-thread decode pipeline (zstd on one core, unfilter on another) — rejected on measurement
+**Why it was proposed:** answering "should PXL offer a multicore build option"
+for modern hardware. `bench/stages` had already shown decode splits into two
+sequential stages whose ratio depends on the filter — for a 3000x3000 photo,
+adaptive spends 59% of decode time unfiltering, delta/none spend 92-98% in
+zstd. Neither stage can be split *within itself*: zstd's back-references are
+sequential, and adaptive's Up/Avg/Paeth each read the row above. But the two
+stages could in principle run *concurrently* on different rows through a
+ring buffer, turning the sum into a max: `max(235.9, 339.6) = 339.6` vs
+`575.5`, a **1.70x ceiling** for adaptive, 1.09x for delta.
+
+**What was built.** `bench/pipeline.c`: a producer thread decompressing into
+an N-row ring, a consumer thread unfiltering out of it, alongside two
+controls run on identical input — `serial-1` (the shipping one-row-window
+decoder) and `serial-N` (same single thread, same ring size), so a bigger
+buffer's own speedup is not credited to threading. All three are checked
+byte-identical every run. Verified race- and deadlock-free under
+ThreadSanitizer, 0 warnings, all ring sizes and filters.
+
+**The problem the measurement ran into.** This project's only test machine is
+a 2-core Pentium B960 laptop, and it could not be gotten cleanly idle: even
+after closing applications dropped the 1-minute load average to 0.09, a
+control of **two fully independent decodes with zero synchronisation between
+them** — the best case any 2-thread scheme could possibly hit — measured only
+54-73% of the 200% CPU-seconds it should get, confirmed by comparing process
+CPU time to wall time rather than trusting `/proc/loadavg`. Across every
+sweep run (9 to 41 repetitions each, at default and at a `nice -10` priority
+boost, the most this non-root shell was permitted), **zero repetitions**
+reached an 85%-of-2-cores threshold. Real-time scheduling (`chrt`) was
+available and would likely have gotten a clean reading, but was not used: two
+non-yielding SCHED_FIFO threads on a 2-core box can starve every other
+process including the one running this measurement, and the machine was
+being administered remotely with nobody able to reach it physically. That
+risk was judged not worth a benchmark number.
+
+**What the contaminated readings agree on anyway.** Every sweep, under every
+condition tried (loadavg 0.09 to 4.9, default and boosted priority), put the
+pipeline's `pipe-N` time at **0.71x-1.04x of `serial-N`** — parity or a
+slight loss, never a gain, and nowhere near the 1.09-1.70x arithmetic
+ceiling. This held even in the runs where the *independent-decode control*
+briefly touched 1.5-1.6x, i.e. when the machine did have some spare
+parallelism to give, the pipeline still did not capture it. That is
+consistent with synchronisation and cache-sharing overhead eating the
+theoretical gain, though it cannot be fully separated from residual
+contention without a genuinely idle two-core window.
+
+**Decision: not adopted.** No sweep, under any condition reached this
+session, showed the pipeline beating the equivalent-ring-size serial decoder.
+Given that, and that the ring buffer and thread lifecycle are real
+complexity and a real (if small) memory cost, a `PXL_DECODE_PIPELINE` build
+option is not worth adding on the evidence collected. Reopen only with a
+measurement taken on hardware that can sustain two genuinely idle cores for
+the duration of the sweep — a rejection resting on a contaminated
+measurement is weaker than the arithmetic it was checking, and should be
+revisited rather than treated as final.
+
+**What this does not affect.** `libpxlcore.a` has zero mutable global state
+(checked with `nm`, against one in libpng), so decoding N independent images
+across N cores already works today with no library changes — that is the
+multicore story for this format, not a same-image pipeline. See the decoder
+size and memory entries above for why the library stays this way.
+
+
 ### Tiling (splitting into squares) — rejected
 **Why it was proposed:** block processing gives better locality and opens up
 parallelism.
