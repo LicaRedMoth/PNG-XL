@@ -61,23 +61,47 @@ Expected output:
 ```
 PXL PSP decode smoke test, libpxl 1.5.0
 [none    ] 64x64 4ch 16384 bytes in 1481 us -- MATCH
-[delta   ] 64x64 4ch 16384 bytes in 2488 us -- MATCH
+[delta   ] 64x64 4ch 16384 bytes in 2487 us -- MATCH
 [adaptive] 64x64 4ch 16384 bytes in 3563 us -- MATCH
-[bcif    ] 64x64 4ch 16384 bytes in 1474 us -- MATCH
+[bcif    ] 64x64 4ch 16384 bytes in 1475 us -- MATCH
 ALL OK
 ```
 
 `MATCH` means the MIPS-compiled decoder reconstructed the exact source pixels
 for that filter — a `memcmp` against pixels computed once on the host, not a
-checksum, so there is no hash collision to worry about. Output goes through
-`sceIoWrite(1, ...)` rather than `printf`, which is what PPSSPP's own test
-suite does and is documented to capture headless; plain libc stdout was not
-used because whether newlib's startup code wires it to fd 1 at all wasn't
-something this project had verified.
+checksum, so there is no hash collision to worry about.
+
+### Where the output actually goes
+
+Real hardware has no console, so `sceIoWrite(1, ...)` alone -- the primitive
+PPSSPP's own test suite captures headless with no setup -- would print into a
+void there: fd 1 is not connected to anything without a debug cable. Every
+result is written to three places at once for that reason, each covering
+where the other two fall short:
+
+- **The PSP's own screen**, via `pspDebugScreenPrintf`. This is what a human
+  looking at real hardware sees. Not touched under headless, which has no
+  display.
+- **`sceIoWrite(1, ...)`.** Captured by `PPSSPPHeadless -l`, ignored by real
+  hardware.
+- **`results.txt`, written next to the running EBOOT.** The only copy that
+  outlives the process. On real hardware: turn on USB Connect from the PSP's
+  Settings menu (or pull the memory stick), and `results.txt` sits in
+  `PSP/GAME/PXLBENCH/` on a computer, plain text, ready to paste into
+  `BENCHMARKS.md` or hand back for that.
+
+The program waits for the X button before returning to the XMB (15 real
+seconds on hardware, since `sceRtcGetCurrentTick` tracks real time there --
+but the same 15 seconds of *emulated* ticks elapse in a fraction of a real
+second under headless mode with no display to pace against, so the automated
+smoke test above still exits on its own in well under a second). Plain libc
+`stdout` was used for none of this because whether it is buffered, or wired to
+fd 1 at all, depends on newlib's startup code in a way this project has not
+verified -- `sceIoWrite` is one layer lower and leaves nothing to that
+assumption.
 
 On real hardware: copy `psp/build/EBOOT.PBP` to
-`ms0:/PSP/GAME/PXLBENCH/EBOOT.PBP` and run it from the PSP's game menu. It
-exits itself after printing, no controls needed.
+`ms0:/PSP/GAME/PXLBENCH/EBOOT.PBP` and run it from the PSP's game menu.
 
 ## Why this isn't a benchmark yet
 

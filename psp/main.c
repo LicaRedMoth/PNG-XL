@@ -17,15 +17,32 @@
     into the binary rather than read from a memory stick, so this runs
     unattended under PPSSPPHeadless with no virtual filesystem to set up.
 
-    Output goes through sceIoWrite(1, ...) rather than printf/stdout: this is
-    the same primitive PPSSPP's own "pspautotests" suite uses, and headless
-    mode is documented to capture it ("emulated printfs") without any extra
-    setup. Plain libc stdout was not used because whether it is line-buffered,
-    fully buffered, or wired to fd 1 at all depends on newlib's startup code in
-    a way this project has not verified -- sceIoWrite is one layer lower and
+    Output goes to three places at once, because each is missing on one of the
+    two places this runs:
+      - sceIoWrite(1, ...) -- the primitive PPSSPP's own "pspautotests" suite
+        uses; headless mode captures it as "emulated printfs" with no setup.
+        On real hardware fd 1 is not connected to anything without a debug
+        cable, so this alone would print into a void there.
+      - pspDebugScreenPrintf -- draws text on the PSP's own screen via the GU.
+        This is what a human looking at real hardware actually sees; headless
+        mode has no display; it is not touched there.
+      - a file on the memory stick -- the only copy that survives after the
+        program exits, and the one meant to leave the console: pull the memory
+        stick or connect over USB, read results.txt, and the numbers in it are
+        what should go into BENCHMARKS.md. The screen and the emulator log are
+        both read-it-once; this one is not.
+    Plain libc stdout was not used for any of this because whether it is
+    buffered, or wired to fd 1 at all, depends on newlib's startup code in a
+    way this project has not verified -- sceIoWrite is one layer lower and
     leaves nothing to that assumption.
+
+    On real hardware the program waits for X before exiting (see main()'s final
+    loop) -- sceKernelExitGame() returns straight to the XMB, and a result
+    nobody had time to read is no better than one that went nowhere.
 */
 #include <pspkernel.h>
+#include <pspdebug.h>
+#include <pspctrl.h>
 #include <psprtc.h>
 
 #include <stdarg.h>
@@ -38,9 +55,21 @@
 PSP_MODULE_INFO("PXLBENCH", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
+/* Bytes for results.txt on the memory stick, accumulated as the test runs.
+   Sized generously against the ~350-byte total this test currently prints --
+   see the truncation guard in put() if the test grows past it. */
+static char   g_log[8192];
+static size_t g_log_len = 0;
+
 static void put(const char* s)
 {
-    sceIoWrite(1, s, strlen(s));
+    size_t n = strlen(s);
+    pspDebugScreenPrintf("%s", s);
+    sceIoWrite(1, s, n);
+    if (g_log_len + n < sizeof g_log) {
+        memcpy(g_log + g_log_len, s, n);
+        g_log_len += n;
+    }
 }
 
 static void putf(const char* fmt, ...)
@@ -51,6 +80,19 @@ static void putf(const char* fmt, ...)
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     put(buf);
+}
+
+/* Writes g_log to a plain-text file next to the running EBOOT -- a relative
+   path resolves there under PSPSDK's io, so this needs no assumption about
+   which ms0:/PSP/GAME/<id>/ this was installed under. */
+static void save_log(void)
+{
+    SceUID fd = sceIoOpen("results.txt",
+                          PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd >= 0) {
+        sceIoWrite(fd, g_log, g_log_len);
+        sceIoClose(fd);
+    }
 }
 
 typedef struct {
@@ -70,6 +112,7 @@ int main(void)
     unsigned i;
     int all_ok = 1;
 
+    pspDebugScreenInit();
     putf("PXL PSP decode smoke test, libpxl %s\n", pxl_version());
     putf("(timings below are emulator microseconds if run under PPSSPPHeadless,\n"
          " not Allegrex hardware time -- see psp/README.md)\n");
@@ -108,6 +151,31 @@ int main(void)
     }
 
     put(all_ok ? "ALL OK\n" : "SOME FAILED\n");
+    save_log();
+    put("\nSaved to results.txt next to this EBOOT. Press X to exit\n"
+        "(or wait -- this returns to the XMB on its own after 15s, so an\n"
+        " unattended run, e.g. under an emulator with no button to press,\n"
+        " still terminates).\n");
+
+    sceCtrlSetSamplingCycle(0);
+    sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
+    {
+        u64 start, now;
+        sceRtcGetCurrentTick(&start);
+        for (;;) {
+            SceCtrlData pad;
+            sceCtrlReadBufferPositive(&pad, 1);
+            if (pad.Buttons & PSP_CTRL_CROSS) {
+                break;
+            }
+            sceRtcGetCurrentTick(&now);
+            if (now - start > 15000000ULL) { /* 15s of ticks, which are microseconds */
+                break;
+            }
+            sceKernelDelayThread(10000); /* 10 ms; a button wait, not a tight poll */
+        }
+    }
+
     sceKernelExitGame();
     return 0;
 }

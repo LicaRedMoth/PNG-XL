@@ -40,9 +40,11 @@ target_include_directories(pxl_psp_bench PRIVATE
 target_compile_definitions(pxl_psp_bench PRIVATE
     ZSTD_DISABLE_ASM=1 ZSTD_LEGACY_SUPPORT=0 ZSTD_MULTITHREAD=0)
 # psp-gcc's own specs already link the base pspuser/pspkernel/libc PSPSDK
-# needs; main.c uses nothing beyond sceIoWrite/sceRtcGetCurrentTick/
-# sceKernelExitGame, all of which live there, so nothing extra is added here
-# on a guess -- see psp/README.md if a real build turns out to need one.
+# needs (sceIoWrite/sceRtcGetCurrentTick/sceKernelExitGame live there); these
+# two are the on-screen output and pad-reading calls main.c adds beyond that;
+# pspge/pspdisplay are pspdebug's own dependencies (it draws through the GU),
+# not something main.c calls directly.
+target_link_libraries(pxl_psp_bench PRIVATE pspdebug pspctrl pspge pspdisplay)
 
 create_pbp_file(
     TARGET pxl_psp_bench
