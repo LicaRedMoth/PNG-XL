@@ -81,18 +81,20 @@ at the default level 1), 1.5x on synthetic stills. Fastest of every lossless
 codec measured on photographs; on synthetic stills WebP is faster. QOI is faster
 still on photographs, and QOI does not compress.
 
-**Decoder size — met on x86, not yet re-checked on the target.** 174 KB of
-`.text` against libpng's 210 KB, and that counts all of libzstd statically
-while libpng's figure excludes the zlib it loads dynamically; counted the
-same way it is 174 KB against 271 KB. Our own decoder is 26 KB of it. This
-read 861 KB until the codec was split into separate encode and decode units,
-which stopped the linker pulling the compressor into decoding builds — the
-format was never the problem. **Caveat added 2026-09-17**: a quick MIPS
-cross-compile at this project's own `-O3` came to 267 KB, 54% over the x86
-figure — the same class of gap decode speed had before it was measured on
-real PSP hardware. See the "Re-verify decoder size on MIPS" entry in
-[`ROADMAP.md`](docs/ROADMAP.md); not yet re-measured through the real build
-pipeline, so "met" here should be read as pending confirmation, not settled.
+**Decoder size — met.** 174 KB of `.text` against libpng's 210 KB, and that
+counts all of libzstd statically while libpng's figure excludes the zlib it
+loads dynamically; counted the same way it is 174 KB against 271 KB. Our own
+decoder is 26 KB of it. This read 861 KB until the codec was split into
+separate encode and decode units, which stopped the linker pulling the
+compressor into decoding builds — the format was never the problem. A quick
+MIPS cross-compile briefly looked 54% over this figure; chased down the same
+day, that was almost entirely two measurement artefacts (`printf`/`fopen`
+statically pulling in newlib internals that cost nothing on dynamically-linked
+x86, and PSPSDK's own ~121 KB empty-program floor) rather than PXL's code —
+net of both, MIPS is 9.6% bigger, an ordinary RISC-vs-CISC difference. See
+RESEARCH.md's "Does WebP even run on PSP?" correction for the full breakdown;
+an official through-the-real-build-pipeline MIPS number is still on
+[`ROADMAP.md`](docs/ROADMAP.md), but not because "met" is in doubt.
 
 **Decode-time memory — met for row-filtered stills.** The filtered stream is
 consumed through a one-row window, so a 3000x3000 photograph streams in 27.6 MiB

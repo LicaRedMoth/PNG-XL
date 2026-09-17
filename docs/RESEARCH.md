@@ -1153,3 +1153,53 @@ before either can be trusted.
 project (the libwebp source and patches used for this check are not
 vendored) — this answers "would it even work" and "roughly how big," which is
 what was asked, not "should PXL be replaced with WebP for this."
+
+**Correction, same day: the 54% was almost entirely measurement artefact, not
+PXL's code.** Asked to find out why, `bench/mindec_pxl.c`'s own `.text` was
+broken down by symbol on MIPS (`psp-nm --size-sort`), and two things were
+wrong with comparing it to the x86 figure at face value:
+
+1. `bench/mindec_pxl.c` calls `printf` and `fopen`/`fread`. On x86 these
+   resolve into dynamically-linked glibc and cost nothing in the static
+   `.text` count. PSP homebrew has no shared libc, so every one of these
+   calls pulls its entire object file's code into the binary — and newlib's
+   `printf` is not modular enough to avoid dragging in float-to-string
+   conversion (`_dtoa_r`, 7 068 B) and even `scanf`-family internals
+   (`__ssvfscanf_r`, 8 948 B) that this program never uses. Rewriting the
+   test PSP-idiomatically (`sceIoWrite` instead of `printf`, the compressed
+   file compiled in instead of `fopen`/`fread`, matching how `psp/main.c`
+   already does it) removed some of this, but not most of it, because —
+2. An **empty PSP program that does nothing but call `sceKernelExitGame()`**
+   already costs **121 004 bytes** of `.text`, against x86's empty-program
+   baseline of 265. PSPSDK's standard newlib runtime start-up
+   (`libcglue.a`'s kernel/environment/timezone glue, run before `main`) calls
+   `sprintf` unconditionally as part of its own initialization — every
+   PSPSDK homebrew binary pays this, regardless of what the program does,
+   and it has no x86 counterpart because Linux's dynamic linker defers
+   essentially all of it to shared libraries instead of statically baking it
+   into every binary.
+
+**Corrected comparison**, each side's own empty-program floor subtracted so
+both measure only the code a program's own logic adds:
+
+| | full `.text` | empty-program floor | net (PXL + zstd) |
+|---|---:|---:|---:|
+| x86 | 174 066 | 265 | 173 801 |
+| MIPS | 311 456 (`-ffunction-sections -fdata-sections -Wl,--gc-sections`) | 121 004 | **190 452** |
+
+**190 452 / 173 801 = 1.096 — PXL's own code is 9.6% bigger on MIPS, not
+54%.** That remainder is an ordinary, expected RISC-vs-CISC code-density
+difference (MIPS's fixed 32-bit instructions encode some operations, like
+loading a large constant, in more instructions than x86's variable-length
+ones do) and is not a red flag. The 121 004-byte floor is real and does
+matter for anyone budgeting PSP flash/RAM against a "how big is my program"
+number, but it is a cost of targeting PSPSDK's standard newlib runtime at
+all, paid by every homebrew binary built this way, not something specific to
+PXL or fixable in PXL's own source.
+
+**What this means for the ROADMAP item it prompted**: "decoder size — met"
+does not need retracting after all — but the *number to quote* for the MIPS
+target is 190 452 (net of the unavoidable PSPSDK floor), not the raw 267 696
+or 311 456 `.text` figures, and none of these three has gone through the
+project's real build pipeline yet. That re-measurement is still worth doing
+properly; it should no longer be expected to find a problem.

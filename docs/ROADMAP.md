@@ -162,21 +162,30 @@ cannot currently describe) and a corpus of natively-565 PSP textures this
 project does not have yet, so it stays a recorded, evidenced option rather
 than a plan.
 
-### Re-verify decoder size on MIPS, not just x86
+### Get an official MIPS decoder-size number through the real build pipeline
 
-Raised 2026-09-17, while checking whether WebP could even run on PSP (see the
-RESEARCH.md entry of the same name) — the check needed a PXL-on-MIPS decoder
-size to compare against, and building one surfaced this: `bench/mindec_pxl.c`
-cross-compiled at this project's own Release flags (`-O3 -DNDEBUG`) came to
-**267 696 bytes** of MIPS `.text`, against the **174 066** this project has
-published as "decoder size — met" everywhere from README to BENCHMARKS.md.
-That figure was gcc/x86 only and was never re-taken on the actual target,
-exactly the gap decode speed had until this session's PSP work closed it.
-54% is not a rounding difference; "met" needs re-checking against a real
-MIPS number before it is trusted further. Not yet done through this
-project's real build pipeline (CMake, the full `pxlcore` target) — the
-267 696 figure is from a quick hand-linked check, good enough to show the gap
-exists, not yet rigorous enough for BENCHMARKS.md.
+Raised 2026-09-17 while checking whether WebP could even run on PSP: a quick
+`bench/mindec_pxl.c` cross-compile came to 267 696 bytes of MIPS `.text`
+against the published x86 figure of 174 066 — alarming at face value, 54%
+over. **Chased down the same day and it was mostly measurement artefact, not
+PXL's code** — see RESEARCH.md's correction under "Does WebP even run on
+PSP?". Two things inflated the raw number: `bench/mindec_pxl.c`'s
+`printf`/`fopen` calls cost nothing on x86 (dynamic glibc) but statically
+pull in newlib's stdio/dtoa internals on PSP, and — the bigger one — an
+*empty* PSPSDK program already costs 121 004 bytes of `.text` before `main`
+runs (`libcglue.a`'s start-up glue calls `sprintf` unconditionally), against
+x86's 265-byte empty baseline. Net of each platform's own floor, PXL's actual
+code is **9.6% bigger on MIPS**, not 54% — an ordinary RISC-vs-CISC code
+density difference.
+
+What's left: an *official* number through this project's real CMake build
+(the `pxlcore` target, not a hand-linked one-off), reported the same way the
+x86 174 066 figure is — net of the PSPSDK floor, since quoting a raw
+MIPS `.text` figure next to the x86 one without subtracting each side's own
+empty-program cost is exactly the mismatched comparison that caused this
+scare in the first place. Low priority now that the scary version turned out
+to be a measurement bug: "decoder size — met" does not appear to be in
+question, just not yet stated for MIPS with a citable, reproducible number.
 
 
 ### Corpus gaps, now that the capture folders are known
