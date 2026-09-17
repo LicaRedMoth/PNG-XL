@@ -107,6 +107,44 @@ people actually export them. Quote whichever matches the question; quoting one
 alone misleads. On 8-bit grayscale plates we are at 100.3%, slightly *worse*
 than PNG, because the colour filter does nothing on one channel.
 
+### On the actual target hardware
+
+Everything above is x86. The decoder was cross-compiled for MIPS with
+`psp-gcc`/PSPSDK and run on a real PSP-3008 — see [`psp/README.md`](psp/README.md)
+for the build, [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for every number.
+
+![PXL against libpng on a real PSP-3008, 333 MHz](docs/img/psp_throughput.png)
+
+Three of PXL's four filters beat libpng by 2.8-3.5x, in line with the x86
+numbers above. `adaptive` ties libpng rather than beating it — both are the
+same per-row predictor pass over 8-bit samples, so parity here is expected,
+not a regression. `BCIF` is the encoder's usual pick for photographic content
+and wins at screen size (2.9x libpng, like the others) — but at texture size
+it **loses to libpng outright**, decoding in about twice libpng's time.
+
+![BCIF does not scale linearly on real Allegrex hardware](docs/img/psp_bcif_scaling.png)
+
+The cause: texture (512x512) has 2.01x the pixels of screen (480x272), and
+every filter except BCIF scales within 2% of that. BCIF takes 10.7x longer
+for the same 2.01x more data. `unpack_bcif4` is a single linear pass, so this
+is not an algorithmic problem — the leading hypothesis is cache or TLB
+pressure from reading four widely-separated colour planes per pixel on a CPU
+with nothing like an x86's cache, but that is a hypothesis, not a confirmed
+mechanism (no PSP profiling tooling exists for this project yet).
+
+**Choosing a filter.** `pxltool` has no per-filter flag — the encoder always
+tries every candidate and keeps whichever compresses smallest, which is a
+size decision, not a decode-speed one. The one lever that exists is `-p`
+(`PXL_ENCODE_PROGRESSIVE`), which excludes BCIF entirely (see
+[Progressive decoding](#progressive-top-to-bottom-decoding) below) and was
+already the right call for streaming and bounded memory. This measurement
+adds a third reason: **on anything texture-sized or larger heading to
+PSP-class hardware, encode with `-p`.** Below that — icons, UI glyphs,
+anything screen-sized or smaller — the default is fine, since that is
+exactly where BCIF is still fast and usually smallest. One console and one
+synthetic pattern measured so far; treat the exact crossover point as
+approximate, not the direction of the effect.
+
 ### What the compression level buys
 
 ![Size against encode time across zstd levels](docs/img/levels.png)
