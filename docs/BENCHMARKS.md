@@ -1722,3 +1722,79 @@ This adds directly to the "Removing BCIF" question in `ROADMAP.md`: a filter
 that is competitive at one size and loses to the format being replaced at
 another, on the actual target hardware, is a harder case to leave alone than
 "5.3x slower than its own linear prediction" was by itself.
+
+---
+
+## 2026-09-18 — GPU-texture streaming and indexed-palette conversion, real hardware
+
+- **Commit:** `1a10c10`
+- **Hardware / method:** same PSP-3008 as the entries above. `psp/main.c`'s
+  `streaming output-format conversion` and `convert_palette` checks (added
+  2026-09-18, headless-verified only until now) ran on real Allegrex silicon
+  for the first time, alongside a full reproducibility pass of the existing
+  decode/libpng sweep. Same firmware quirk as every previous run: two full
+  boots, one pinned to 333 MHz actual regardless of which clock was
+  requested, one pinned to 222 MHz actual — see the 2026-09-17 entries above
+  for why that happens on this console.
+
+### Reproducibility, before trusting the new rows
+
+| cell | previously recorded | this run | difference |
+|---|---:|---:|---:|
+| screen none, 333 MHz | 24 829 µs | 24 787 µs | 0.17% |
+| texture bcif, 333 MHz | 260 208.5 µs | 260 144 µs | 0.02% |
+| screen none, 222 MHz | 37 567.5 – 37 629.5 µs | 37 558 µs | ≤0.19% |
+| texture bcif, 222 MHz | 397 313 – 397 322.5 µs | 397 585 µs | ≤0.07% |
+
+All four within the ~0.2% band the previous reproducibility check already
+established. This run's PXL/libpng/BCIF numbers otherwise match the
+2026-09-17 entries above and are not repeated here.
+
+### `strm565` throughput: decode straight to RGB565, real hardware
+
+`ROADMAP.md`'s "decode straight into a GPU texture" item asked whether
+`pxl_stream_new_ex`'s row conversion "comes for free inside the existing
+per-row write" or costs something. It costs something:
+
+| size | plain `none` decode | `strm565` (RGB565 out) | overhead |
+|---|---:|---:|---:|
+| screen 480x272, 333 MHz | 24 787 µs | 34 157 µs | +37.8% |
+| screen 480x272, 222 MHz | 37 558 µs | 51 732 µs | +37.7% |
+| texture 512x512, 333 MHz | 40 730 µs | 58 430 µs | +43.5% |
+| texture 512x512, 222 MHz | 61 844 µs | 88 430 µs | +43.0% |
+
+The overhead ratio holds within 0.1 points across both clocks at a given
+size (37.7-37.8% for screen, 43.0-43.5% for texture) — a clean proportional
+cost, not a fixed one, consistent with the conversion being ordinary CPU
+work that scales with clock the same way decode itself does. It is higher at
+texture size than screen size (2.008x the pixels), the same size-scaling
+direction as the BCIF comparisons above — expected for a per-pixel cost, not
+itself a new finding.
+
+`strm565`'s own MB/s figures (7.29-8.56 MB/s) undercount what it actually
+does, since they count only the half-sized RGB565 output bytes. In pixels
+reconstructed per second, against a plain `none` decode and against libpng:
+
+| size, clock | `none` (Mpx/s) | `strm565` (Mpx/s) | `png` (Mpx/s) |
+|---|---:|---:|---:|
+| screen, 333 MHz | 5.27 | 3.82 | 1.83 |
+| screen, 222 MHz | 3.48 | 2.52 | 1.21 |
+| texture, 333 MHz | 6.44 | 4.49 | 1.86 |
+| texture, 222 MHz | 4.24 | 2.96 | 1.23 |
+
+Even paying the conversion overhead, `strm565` still reconstructs pixels
+roughly 2x faster than libpng's plain RGBA8888 decode at either clock — and
+libpng has no equivalent single-pass path to a native GE format at all;
+matching what `strm565` does here would mean a libpng decode plus a second,
+separate conversion pass, which would only widen the gap. This is the number
+the "measure the full load pipeline" ROADMAP item was missing for the
+conversion step specifically.
+
+### `convert_palette`: correctness confirmed on real hardware
+
+`[palette RGBA5551] 8 bytes -- MATCH`, on real Allegrex, not just under
+`PPSSPPHeadless`. This was the one piece of "indexed mode maps onto the
+hardware" (`ROADMAP.md`, done 2026-09-18) that had only ever been checked in
+the emulator; it now has a real-hardware confirmation too. No throughput
+row: an eight-byte, ≤256-entry palette conversion is not large enough for a
+15-rep median to say anything a correctness check doesn't already cover.

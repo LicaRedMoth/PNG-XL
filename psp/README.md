@@ -16,14 +16,15 @@ comparison the numbers above had nothing against: libpng". PXL beats libpng
 size but **loses to libpng at texture size** — see the "Removing BCIF" entry
 in `ROADMAP.md`'s Held section for what that adds up to.
 
-**Added 2026-09-18, not yet run on real hardware**: `pxl_stream_new_ex`'s
-row-conversion to PSP-native RGB565/RGBA5551 (README's "Decoding straight
-into a GPU's native texture format") — correctness is headless-verified
-against a MIPS-side reference (`-- streaming output-format conversion --`
-below), and a `strm565` throughput row exists in the sweep, but its number
-has not been taken on the console yet. This is exactly the same
-code-verified-timing-pending state the whole throughput sweep was in before
-2026-09-17 — see [Why the headless numbers are not the answer](#why-the-headless-numbers-are-not-the-answer).
+**Added 2026-09-18, verified on real hardware the same day**:
+`pxl_stream_new_ex`'s row-conversion to PSP-native RGB565/RGBA5551
+(README's "Decoding straight into a GPU's native texture format") and
+`pxl_convert_palette`'s palette conversion both matched on the PSP-3008, not
+just under `PPSSPPHeadless`. `strm565`'s real throughput is in
+`BENCHMARKS.md`'s "GPU-texture streaming and indexed-palette conversion,
+real hardware" entry: decoding straight to RGB565 costs 37.7-43.5% more
+decode time than a plain `pxl_decode()`, but still reconstructs pixels
+roughly 2x faster than libpng's plain RGBA8888 decode on the same hardware.
 
 ## One-time setup
 
@@ -208,7 +209,8 @@ does not state its conditions is a failure mode this project has already
 been burned by twice.
 
 Every number this program prints is already in `BENCHMARKS.md` as of
-2026-09-17. A fresh run now is a reproducibility check, not a gap-filler --
-and the last one landed within 0.2% of the recorded numbers despite the
-binary growing from 528 KB to 919 KB in between, which is itself worth
-knowing before trusting any of this further.
+2026-09-18 (the decode/libpng sweep as of 2026-09-17, `strm565` and
+`convert_palette` added 2026-09-18). A fresh run now is a reproducibility
+check, not a gap-filler -- and the last one landed within 0.2% of the
+recorded numbers despite the binary growing from 528 KB to 919 KB in
+between, which is itself worth knowing before trusting any of this further.

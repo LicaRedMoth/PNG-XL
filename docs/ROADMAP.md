@@ -10,18 +10,23 @@ measurement states its sampling.
 
 ## Now
 
-Memory and decoder size are both closed (see *Done* below). What stands between
-here and freezing the specification:
+Memory and decoder size are both closed (see *Done* below). Both pre-freeze
+items below are done too — what actually stands between here and freezing the
+specification is the freeze decision itself (see "Then freeze").
 
-### Decide `sBIT`, before the freeze
+### Done — `sBIT` is kept
 
-PNG's significant-bits chunk is dropped along with `PLTE`, `tRNS`, `bKGD` and
-`hIST` under a rule about chunks that depend on pixel layout. For a 16-bit
-non-indexed image the layout is *not* changed, so `sBIT` stays valid and the
-rule is too broad. Keeping it is what gives 10-bit content its actual value —
-a reader learns the range is 10-bit — without a packed sample format, which was
-measured and rejected because it compresses 23% *worse*. Metadata only; the
-decoder never looks at it. See [`RESEARCH.md`](RESEARCH.md).
+Decided and shipped 2026-09-16 (`c9b36e8`). PNG's significant-bits chunk was
+dropped along with `PLTE`, `tRNS`, `bKGD` and `hIST` under a rule about chunks
+that depend on pixel layout — too broad, since for a 16-bit non-indexed image
+canonicalization does *not* change the layout, so `sBIT` stays valid. Keeping
+it is what gives 10-bit content its actual value — a reader learns the range
+is 10-bit — without a packed sample format, which was measured and rejected
+because it compresses 23% *worse*. Metadata only; the decoder never looks at
+it. Fixing this also surfaced an older chunk-ordering bug (`gAMA`/`sBIT`/etc.
+must precede `PLTE`, which the injector wasn't guaranteeing on indexed
+images), fixed in the same commit. Verified bit-exact on all 162 PngSuite
+files, the 49 of which carry `sBIT`. See [`RESEARCH.md`](RESEARCH.md).
 
 ### Done — `bench/encstages` is written up
 
@@ -36,13 +41,47 @@ guarantee), with the measurement recorded so it need not be repeated. See
 
 ### Then freeze
 
-Both pre-freeze items are done: `sBIT` is kept, and `bench/encstages` is
-written up. A security audit of the untrusted-input paths (2026-09-16) found and
-fixed two 32-bit integer-overflow OOB reads and is recorded in
+A security audit of the untrusted-input paths (2026-09-16) found and fixed
+two 32-bit integer-overflow OOB reads and is recorded in
 [`RESEARCH.md`](RESEARCH.md); the pixel-format audit is done. What remains before
 freezing is a decision to freeze — the format is pre-release with no outside
 users, so the spec can still change without a version bump, and that window
 closes at release.
+
+### Real charts: texture load pipeline, PXL vs PNG, init to use, plus weight
+
+Combines two items already below ("Plot the benchmarks instead of only
+tabulating them", "Measure the full load pipeline, not just decode") into one
+concrete ask, specifically for textures, moved up from Next because both of
+its blockers may now be gone rather than because the scope changed:
+
+- A **real** (measured on hardware, not projected) `Memory Stick -> file ->
+  decode -> usable texture -> sceGuDrawArray` timer, PXL against libpng, on
+  the PSP-3008. The "Measure the full load pipeline" entry below says this
+  needs "real hardware, which is not available while the console is
+  elsewhere" — that was true 2026-09-17; it no longer is, since two more
+  rounds of real-hardware numbers have landed since (this file's and
+  `BENCHMARKS.md`'s 2026-09-18 entries). The timer itself is still unbuilt.
+- A **committed, generated** SVG chart — script-produced from the same data
+  the tables use, not hand-drawn, corpus and sampling stated in the figure —
+  for both the load-pipeline timing and the size ("weight") comparison, per
+  the requirements "Plot the benchmarks" already states below. Neither chart
+  exists yet; both are currently tables only.
+
+### Animated `.apxl` texture playback on PSP — not started
+
+Nothing in `psp/main.c` decodes more than a single still frame. Every
+correctness and throughput row measured so far (smoke/screen/texture, all
+four filters, `strm565`, `convert_palette`) is a static image — no `.apxl`
+sequence has ever been decoded on this target, headless or real. The piece
+an animated texture would reuse per frame, `pxl_stream_new_ex`'s row-to-
+RGB565/RGBA5551 conversion, already exists (2026-09-18) and is verified for
+a single frame; nobody has chained it across frames, uploaded successive
+textures to VRAM, or driven `sceGuDrawArray` with the result. This is new
+work, not a re-verification of something already built: implement it,
+correctness-check under `PPSSPPHeadless` the way the still path was, then
+take real timing once that passes — the same two-stage pattern
+`psp/README.md` already uses for everything else on this target.
 
 ## Next
 
@@ -125,12 +164,15 @@ Two things that would follow naturally now that a real result exists:
   three packed formats plus RGBA8888, on both a 4-channel and a 3-channel
   (alpha-defaults-opaque) source, and rejects the geometry that is not
   defined for it; `psp/main.c` re-runs the same check with a MIPS-side
-  reference and adds a throughput row (`strm565`) so a real hardware run
-  will show whether the streaming+conversion path costs anything over a
-  plain `pxl_decode()` — headless-verified correct, timing pending real
-  hardware. Swizzled output (an 8-row window instead of 1) is not done;
-  nothing needs it without a concrete texture-cache-locality case to measure
-  against, and one-row PXL_OUTPUT_* conversion did not need it either.
+  reference and adds a throughput row (`strm565`). **Measured on real
+  hardware 2026-09-18** (same PSP-3008): correctness matched, and the
+  streaming+conversion path costs 37.7-43.5% more decode time than a plain
+  `pxl_decode()` — not free, but still ~2x libpng's plain RGBA8888 decode
+  rate on the same hardware. See `BENCHMARKS.md`'s "GPU-texture streaming
+  and indexed-palette conversion, real hardware" entry. Swizzled output (an
+  8-row window instead of 1) is not done; nothing needs it without a
+  concrete texture-cache-locality case to measure against, and one-row
+  PXL_OUTPUT_* conversion did not need it either.
 - **Done 2026-09-18 — indexed mode maps onto the hardware.** Confirmed against
   `pspgu.h` directly rather than from memory: `GU_PSM_T4`/`T8` are real,
   documented `sceGuTexMode` formats, and 5650/5551/4444/8888 are marked valid
@@ -144,7 +186,8 @@ Two things that would follow naturally now that a real result exists:
   the GE samples directly. For UI art that is a quarter of the memory and the
   bus traffic of the equivalent RGBA8888 texture. Verified against an
   independent reference on both x86 (`tests/roundtrip.c`) and real MIPS
-  output (`psp/main.c`, headless-checked). (`GU_PSM_DXT1/3/5` constants also
+  output (`psp/main.c`, headless-checked and, as of 2026-09-18, confirmed on
+  real PSP-3008 hardware too). (`GU_PSM_DXT1/3/5` constants also
   exist in `pspgu.h`, but are absent from `sceGuTexMode`'s own documented
   format list — not something this project is relying on.)
 
@@ -265,16 +308,25 @@ regression later.
 
 ## Corpora
 
-`tests/data/` holds the committed inputs; the large downloads are gitignored with
-a comment naming each one. Present locally:
+`tests/data/` holds a handful of small files actually committed to the repo
+(see `tests/data/README.md`) plus a much larger set of gitignored downloads,
+each named in a `.gitignore` comment. Correction, 2026-09-18: this section
+previously called Kodak and the PNG test suite "committed" -- checked against
+`.gitignore` directly rather than assumed, and they are not; only two tiny
+reference files (one PNG, one APNG, plus their `.pxl`/`.apxl` encodes) are
+actually tracked. Present locally:
 
-- Kodak (24 photographs) and the official PNG test suite — committed, and what
-  the corpus table measures.
+- Kodak (24 photographs) and the official PNG test suite — gitignored, and
+  what the corpus table measures. How they were fetched is not currently
+  documented anywhere in the repo.
 - CLIC 2020 mobile train, 1048 photographs, 3.8 GB. High-resolution
   photographic content, largely unexercised so far.
 - Anita industrial animation, 16871 frames in 367 shots, 11 GB, three passes per
   shot. The first real hand-drawn animation available to the project and the
   source of the cross-frame findings above.
+- Synthetic screenshots from Wikimedia Commons, fetched reproducibly by
+  `bench/synthetic_png.sh` (not committed, same reasoning as below) — see
+  "Corpus gaps" below for what this closed.
 
 The gap worth naming: there is still no corpus of synthetic non-photographic
 stills — UI screenshots, diagrams, rendered text. That is the content where a
