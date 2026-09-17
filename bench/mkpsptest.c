@@ -1,41 +1,62 @@
 /** \file mkpsptest.c
-    \brief Generates the embedded test data for the PSP decode smoke test
-           (psp/testdata.h): one valid .pxl file per color filter, plus the
-           known-correct raw pixels to check the PSP decode against.
+    \brief Generates the embedded test data for the PSP program (psp/testdata.h):
+           one valid .pxl file per (size, color filter) pair, plus the
+           known-correct raw pixels to check each size's decode against.
 
-    Why embedded rather than files on a memory stick: the PSP program is run
+    Why embedded rather than files on a memory stick: the smoke-test path runs
     under PPSSPPHeadless with no interactive setup and no physical console, so
     the test data travels inside the ELF as C arrays. That also sidesteps
-    needing to get PPSSPPHeadless's virtual memory-stick root right.
+    needing to get PPSSPPHeadless's virtual memory-stick root right, and means
+    the real-hardware benchmark needs nothing copied onto the memory stick
+    beyond the one EBOOT.PBP.
 
-    Why every filter is forced rather than letting the encoder choose: the
-    point of psp/main.c is a per-filter decode check (and eventually timing),
-    and pxl_encode_ex always picks whichever candidate compresses smallest, so
-    a normal encode of any one image would only exercise one filter. This
-    reimplements just the encode tail (apply one named filter, compress,
-    assemble the container) instead of the full candidate search --
-    apply_filter and pxl_header_write are exactly what pxl_encode_ex itself
-    calls, so the files this produces are what the real encoder would produce
-    if it had chosen that filter.
+    Why every filter is forced rather than letting the encoder choose:
+    pxl_encode_ex always picks whichever candidate compresses smallest, so a
+    normal encode of any one image would only exercise one filter, and the
+    point here is a per-filter number. This reimplements just the encode tail
+    (apply one named filter, compress, assemble the container) instead of the
+    full candidate search -- apply_filter and pxl_header_write are exactly
+    what pxl_encode_ex itself calls, so the files this produces are what the
+    real encoder would produce if it had chosen that filter.
 
-    The source image is synthetic (a formula, not a file) so this generator
-    has no input dependency: 64x64 RGBA8888 with enough curvature in two of
-    its three channels that NONE, DELTA and ADAPTIVE each compress
-    differently, which is the point -- a flat or purely linear image would
-    make every filter look the same.
+    Three sizes, matching ROADMAP.md's "measure decode on the target hardware"
+    entry: a small "smoke" case cheap enough to always run (correctness only,
+    64x64 -- too small for a throughput number to mean anything, per-call
+    overhead dominates), a "screen" case (480x272, the PSP's own display
+    resolution) and a "texture" case (512x512, a common GE texture size). The
+    latter two are what the on-device throughput sweep times.
+
+    Every size uses the same synthetic pattern (psp/pattern.h -- a formula,
+    not a file, so this generator has no input dependency), tuned to be
+    closer to real UI/game content than pure noise: a smooth diagonal ramp, a
+    coarse 16px block checkerboard (edges like panel borders, not per-pixel
+    noise), and a quadratic curve, so NONE/DELTA/ADAPTIVE/BCIF land on
+    genuinely different compressed sizes without either tying (a flat image)
+    or being unrepresentatively harsh (per-pixel noise compresses worse than
+    almost anything real, which would understate every filter's decode speed
+    since zstd dominates decode time and zstd's speed depends on how much
+    there actually is to decompress).
+
+    Only the compressed .pxl files are embedded, not the reference pixels:
+    main.c re-derives them from the same formula instead, which is what keeps
+    the generated header under 1.5 MB rather than the ~9.6 MB a screen- and
+    texture-sized raw reference image would cost as hex text.
 
     Usage:
       bench/mkpsptest > psp/testdata.h
 */
 
 #include "../src/pxl_codec_encode.c"
+#include "../psp/pattern.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define W 64
-#define H 64
+typedef struct {
+    const char* name;
+    uint32_t    w, h;
+} pxl_psp_size;
 
 static pxl_buffer encode_forced(const pxl_image* img, int zstd_level, uint8_t filter)
 {
@@ -133,68 +154,82 @@ static void emit_array(const char* name, const unsigned char* data, size_t len)
     printf("static const unsigned int %s_len = %uu;\n\n", name, (unsigned)len);
 }
 
+static uint8_t* make_pattern(uint32_t w, uint32_t h)
+{
+    uint8_t* raw = (uint8_t*)malloc((size_t)w * h * 4);
+    uint32_t x, y;
+    if (!raw) {
+        return NULL;
+    }
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            pxl_psp_pattern_pixel(x, y, raw + ((size_t)y * w + x) * 4);
+        }
+    }
+    return raw;
+}
+
 int main(void)
 {
-    static const struct { const char* name; uint8_t filter; } cases[] = {
+    static const struct { const char* name; uint8_t filter; } filters[] = {
         { "none",     PXL_FILTER_NONE },
         { "delta",    PXL_FILTER_DELTA },
         { "adaptive", PXL_FILTER_ADAPTIVE },
         { "bcif",     PXL_FILTER_BCIF },
     };
-    pxl_image img;
-    uint8_t* raw;
-    uint32_t x, y;
-    size_t ci;
-
-    raw = (uint8_t*)malloc((size_t)W * H * 4);
-    if (!raw) {
-        return 1;
-    }
-    /* r: diagonal ramp, g: xor checkerboard (high-frequency, punishes any
-       predictor), b: quadratic curve (rewards Paeth over a plain left-delta),
-       a: constant -- deliberately not all the same shape, so the four
-       filters land on genuinely different compressed sizes rather than
-       coincidentally tying. */
-    for (y = 0; y < H; y++) {
-        for (x = 0; x < W; x++) {
-            uint8_t* p = raw + ((size_t)y * W + x) * 4;
-            p[0] = (uint8_t)(x * 3 + y * 5);
-            p[1] = (uint8_t)(x ^ y);
-            p[2] = (uint8_t)(x * x + y * y);
-            p[3] = 255;
-        }
-    }
-
-    memset(&img, 0, sizeof img);
-    img.buffer.data       = raw;
-    img.buffer.size       = (size_t)W * H * 4;
-    img.width             = W;
-    img.height            = H;
-    img.channels          = 4;
-    img.bytes_per_channel = 1;
-    img.bit_depth         = 8;
+    /* "smoke": cheap, always-run correctness check. "screen"/"texture": what
+       ROADMAP.md's throughput sweep times -- the PSP's own display resolution
+       and a common GE texture size. */
+    static const pxl_psp_size sizes[] = {
+        { "smoke",   64,  64  },
+        { "screen",  480, 272 },
+        { "texture", 512, 512 },
+    };
+    size_t si, ci;
 
     printf("/* Generated by bench/mkpsptest.c -- do not edit by hand.\n"
-           "   %dx%d RGBA8888, one valid .pxl file per color filter, plus the\n"
-           "   known-correct decoded pixels to check against. */\n"
+           "   One valid .pxl file per (size, color filter) pair, plus the\n"
+           "   known-correct decoded pixels to check each size's decode\n"
+           "   against. See bench/mkpsptest.c for what each size is for. */\n"
            "#ifndef PXL_PSP_TESTDATA_H\n"
-           "#define PXL_PSP_TESTDATA_H\n\n", W, H);
+           "#define PXL_PSP_TESTDATA_H\n\n");
 
-    emit_array("pxl_psp_expected_pixels", raw, img.buffer.size);
-
-    for (ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
-        pxl_buffer enc = encode_forced(&img, PXL_LEVEL_DEFAULT, cases[ci].filter);
+    for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        pxl_image img;
+        uint8_t* raw = make_pattern(sizes[si].w, sizes[si].h);
         char name[64];
-        if (!enc.data) {
-            fprintf(stderr, "error: forcing filter '%s' failed\n", cases[ci].name);
+
+        if (!raw) {
+            fprintf(stderr, "error: out of memory generating '%s'\n", sizes[si].name);
             return 1;
         }
-        snprintf(name, sizeof name, "pxl_psp_file_%s", cases[ci].name);
-        emit_array(name, enc.data, enc.size);
-        free(enc.data);
+        memset(&img, 0, sizeof img);
+        img.buffer.data       = raw;
+        img.buffer.size       = (size_t)sizes[si].w * sizes[si].h * 4;
+        img.width             = sizes[si].w;
+        img.height            = sizes[si].h;
+        img.channels          = 4;
+        img.bytes_per_channel = 1;
+        img.bit_depth         = 8;
+
+        fprintf(stderr, "%-8s %ux%u, %zu raw bytes\n", sizes[si].name,
+                sizes[si].w, sizes[si].h, img.buffer.size);
+
+        for (ci = 0; ci < sizeof filters / sizeof filters[0]; ci++) {
+            pxl_buffer enc = encode_forced(&img, PXL_LEVEL_DEFAULT, filters[ci].filter);
+            if (!enc.data) {
+                fprintf(stderr, "error: forcing filter '%s' on '%s' failed\n",
+                        filters[ci].name, sizes[si].name);
+                return 1;
+            }
+            fprintf(stderr, "  %-8s -> %zu compressed bytes\n", filters[ci].name, enc.size);
+            snprintf(name, sizeof name, "pxl_psp_%s_file_%s", sizes[si].name, filters[ci].name);
+            emit_array(name, enc.data, enc.size);
+            free(enc.data);
+        }
+        free(raw);
     }
 
     printf("#endif\n");
-    free(raw);
     return 0;
 }

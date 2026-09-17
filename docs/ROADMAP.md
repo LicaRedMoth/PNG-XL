@@ -78,13 +78,17 @@ now decodes in roughly the size of its output, but **no number in this project
 was ever taken on the hardware it is aimed at**, and throughput is the one
 figure that cannot be derived from the x86 runs.
 
-**Done 2026-09-16, as far as it can be without the console**: the decoder
-cross-compiles for MIPS with `psp-gcc`/PSPSDK unchanged, and decodes every
-filter bit-exact under `PPSSPPHeadless` — see [`psp/README.md`](../psp/README.md).
-That closes the code-risk side of this item (does it even build and run on the
-real target) but not the measurement itself: an emulator's timing is the
-emulator's own JIT speed, not the 222/333 MHz Allegrex core, and this project
-has already published two numbers that were plausible and wrong from measuring
+**Code-risk side closed 2026-09-16**: the decoder cross-compiles for MIPS with
+`psp-gcc`/PSPSDK unchanged, and decodes every filter bit-exact under
+`PPSSPPHeadless` — see [`psp/README.md`](../psp/README.md).
+
+**Confirmed on real hardware 2026-09-17**, a PSP-3008: all twelve correctness
+cases (three sizes × four filters) came back bit-exact on actual Allegrex
+silicon, not an emulator. The throughput sweep at both 222 and 333 MHz (added
+the same day, after the hardware check) has not yet had its numbers pulled
+off the console and into this table — an emulator's timing is the emulator's
+own JIT speed, not the 222/333 MHz Allegrex core, and this project has already
+published two numbers that were plausible and wrong from measuring
 an adjacent thing by mistake (see `RESEARCH.md`) — an emulator figure reported
 as hardware would be a third. What's left is purely "get a PSP in hand and run
 `psp/build.sh` + copy `EBOOT.PBP` over" — no further code work blocks it.
