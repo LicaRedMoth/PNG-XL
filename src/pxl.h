@@ -90,6 +90,20 @@ size_t pxl_row_bytes(const pxl_image* img);
 #define PXL_ENCODE_PROGRESSIVE 1u /* pick only row-wise filters (never BCIF) so the
                                      result decodes top-to-bottom via the streaming
                                      API -- useful for progressive web loading */
+#define PXL_ENCODE_FAST_DECODE 2u /* restrict to {NONE, DELTA} -- the two filters
+                                     measured to always decode faster than libpng.
+                                     BCIF and ADAPTIVE are excluded: on a real PSP,
+                                     BCIF loses to libpng outright at texture sizes
+                                     despite winning at screen size (see
+                                     docs/BENCHMARKS.md, 2026-09-17), and ADAPTIVE
+                                     only ties libpng rather than beating it. Costs
+                                     more size than the default (2.9% measured on a
+                                     corpus of real UI screenshots) in exchange for
+                                     a decode-speed guarantee the default does not
+                                     make. Implies PXL_ENCODE_PROGRESSIVE's effect
+                                     (BCIF is excluded either way) but not the
+                                     reverse -- PXL_ENCODE_PROGRESSIVE alone still
+                                     allows ADAPTIVE. */
 
 /* Encode raw pixels into a complete .pxl byte stream (header + zstd frame).
    zstd_level <= 0 selects PXL_LEVEL_DEFAULT.

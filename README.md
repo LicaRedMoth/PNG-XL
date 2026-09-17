@@ -132,18 +132,27 @@ pressure from reading four widely-separated colour planes per pixel on a CPU
 with nothing like an x86's cache, but that is a hypothesis, not a confirmed
 mechanism (no PSP profiling tooling exists for this project yet).
 
-**Choosing a filter.** `pxltool` has no per-filter flag — the encoder always
-tries every candidate and keeps whichever compresses smallest, which is a
-size decision, not a decode-speed one. The one lever that exists is `-p`
-(`PXL_ENCODE_PROGRESSIVE`), which excludes BCIF entirely (see
-[Progressive decoding](#progressive-top-to-bottom-decoding) below) and was
-already the right call for streaming and bounded memory. This measurement
-adds a third reason: **on anything texture-sized or larger heading to
-PSP-class hardware, encode with `-p`.** Below that — icons, UI glyphs,
-anything screen-sized or smaller — the default is fine, since that is
-exactly where BCIF is still fast and usually smallest. One console and one
-synthetic pattern measured so far; treat the exact crossover point as
-approximate, not the direction of the effect.
+**Choosing a filter.** The default tries every candidate and keeps whichever
+compresses smallest — a size decision, not a decode-speed one. Two flags
+narrow that:
+
+- **`-p`** (`PXL_ENCODE_PROGRESSIVE`) excludes BCIF, for streaming and
+  bounded memory (see [Progressive decoding](#progressive-top-to-bottom-decoding)
+  below) — and, per this measurement, because BCIF loses outright to libpng
+  at texture size. ADAPTIVE is still a candidate under `-p`.
+- **`-s`** (`PXL_ENCODE_FAST_DECODE`) goes further: {none, delta} only, the
+  two filters measured to always beat libpng in decode speed. ADAPTIVE only
+  *ties* libpng rather than beating it, so `-s` drops it too. This costs more
+  size than `-p` alone — 2.9% measured on 821 real UI screenshots, against
+  `-p`'s own 4–6.6% for excluding BCIF — in exchange for a decode-speed
+  guarantee neither the default nor `-p` makes.
+
+**Recommendation**: on anything texture-sized or larger heading to PSP-class
+hardware, encode with `-s`. Below that — icons, UI glyphs, anything
+screen-sized or smaller — the default is fine, since that is exactly where
+BCIF is still fast and usually smallest. One console and one synthetic
+pattern measured so far; treat the exact crossover point as approximate, not
+the direction of the effect.
 
 ### What the compression level buys
 
@@ -429,7 +438,10 @@ This needs no format change: rows decode independently under *delta* and depend
 only on the row above under *adaptive*, so both stream. Only *BCIF* breaks it.
 
 Encode with `PXL_ENCODE_PROGRESSIVE` (`pxltool c … -p`) to exclude BCIF, then
-push bytes into the streaming decoder in any chunk size:
+push bytes into the streaming decoder in any chunk size. `PXL_ENCODE_FAST_DECODE`
+(`-s`, see [above](#on-the-actual-target-hardware)) streams too, since
+{none, delta} are both row-safe — it is a stricter version of `-p` with a
+decode-speed guarantee `-p` alone does not make.
 
 ```c
 pxl_stream* s = pxl_stream_new(on_row, ctx);   /* on_row is called per row */

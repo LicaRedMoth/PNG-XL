@@ -23,6 +23,28 @@ real images.
 DEFLATE. Progressive decode is preserved: a row depends only on the row above.
 **Decision:** accepted, this is the format's main path.
 
+### `-s` / `PXL_ENCODE_FAST_DECODE`: an opt-in filter set with a decode-speed guarantee
+**Why:** the PSP-3008 measurement (2026-09-17, `docs/BENCHMARKS.md`) found BCIF
+loses to libpng outright at texture sizes despite winning at screen size, and
+ADAPTIVE only ties libpng's decode speed rather than beating it. The default
+candidate set picks whichever compresses smallest, which is a size decision —
+it does not guarantee PXL beats libpng in decode speed, priority #1. `-p`
+already excludes BCIF for streaming reasons but still allows ADAPTIVE.
+
+**Measured cost of also excluding ADAPTIVE** (`bench/adaptivecost.c`), by
+corpus: Kodak photographs 3.685%, the official PNG test suite 19.6% (mostly
+30x30 fixtures where the 28-byte header dominates — not representative),
+Synthetic-Screenshots (821 real UI screenshots) **2.933%** — smaller than
+`-p`'s own already-accepted 4–6.6% cost for excluding BCIF alone.
+
+**Decision:** accepted as an opt-in flag (`-s` in `pxltool`,
+`PXL_ENCODE_FAST_DECODE` in the API), not the default — the default's whole
+point is "smallest wins," and file size is a stated priority too; forcing
+every user to pay ADAPTIVE's tie-not-loss cost would trade one priority for
+another that was not asked for. `-s` restricts candidates to {NONE, DELTA},
+the two filters measured to always beat libpng in decode speed, and implies
+`-p`'s BCIF exclusion.
+
 ### Metadata is carried over byte for byte
 **Why:** PXL must be a safe replacement for PNG, not lose EXIF and ICC.
 **Result:** `eXIf`, `iCCP`, `cICP`, `gAMA`, `cHRM`, `sRGB`, `pHYs`, `tIME`,

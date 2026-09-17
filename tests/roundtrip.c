@@ -235,6 +235,68 @@ static int check_adaptive(void)
     return ok;
 }
 
+/* PXL_ENCODE_FAST_DECODE must exclude ADAPTIVE, not just BCIF: reuses
+   check_adaptive()'s exact content (a vertical gradient, proven above to make
+   the default encoder pick ADAPTIVE) and confirms FAST_DECODE picks something
+   else. If this content ever stops selecting ADAPTIVE by default, this test
+   would silently stop covering the path it exists for -- same guard
+   check_adaptive() already applies to itself. */
+static int check_fast_decode_excludes_adaptive(void)
+{
+    pxl_image src, dec;
+    pxl_buffer enc;
+    pxl_header h;
+    uint32_t w = 200, h_ = 200, x, y;
+    size_t size = (size_t)w * h_ * 3;
+    int ok = 1;
+
+    memset(&src, 0, sizeof(src));
+    src.buffer.data = (unsigned char*)malloc(size);
+    src.buffer.size = size;
+    src.width = w; src.height = h_; src.channels = 3; src.bytes_per_channel = 1;
+    if (!src.buffer.data) { printf("[FAIL] fast_decode: alloc\n"); return 0; }
+
+    for (y = 0; y < h_; ++y)
+        for (x = 0; x < w; ++x) {
+            size_t o = ((size_t)y * w + x) * 3;
+            src.buffer.data[o + 0] = (unsigned char)y;
+            src.buffer.data[o + 1] = (unsigned char)(y + (x >> 4));
+            src.buffer.data[o + 2] = (unsigned char)(255 - y);
+        }
+
+    enc = pxl_encode(&src, 12);
+    if (!enc.data || !pxl_header_read(enc.data, enc.size, &h) ||
+        h.color_filter != PXL_FILTER_ADAPTIVE) {
+        printf("[FAIL] fast_decode: fixture no longer selects adaptive by default\n");
+        pxl_free(&enc); pxl_image_free(&src);
+        return 0;
+    }
+    pxl_free(&enc);
+
+    enc = pxl_encode_ex(&src, 12, PXL_ENCODE_FAST_DECODE);
+    if (!enc.data || !pxl_header_read(enc.data, enc.size, &h)) {
+        printf("[FAIL] fast_decode: encode\n"); pxl_image_free(&src); return 0;
+    }
+    if (h.color_filter != PXL_FILTER_NONE && h.color_filter != PXL_FILTER_DELTA) {
+        printf("[FAIL] fast_decode: expected none/delta, got filter %u\n", h.color_filter);
+        ok = 0;
+    }
+    dec = pxl_decode(enc);
+    if (!dec.buffer.data || dec.buffer.size != size ||
+        memcmp(dec.buffer.data, src.buffer.data, size) != 0) {
+        printf("[FAIL] fast_decode: pixels differ after round-trip\n");
+        ok = 0;
+    } else if (ok) {
+        printf("[ OK ] fast_decode: adaptive excluded, filter %u, %zu -> %zu bytes, lossless\n",
+               h.color_filter, size, enc.size);
+    }
+
+    pxl_free(&enc);
+    pxl_image_free(&src);
+    pxl_image_free(&dec);
+    return ok;
+}
+
 /* Animation round-trip: a moving block over a gradient, plus one unchanged
    frame. Verifies every full canvas frame comes back bit-exact, exercising
    keyframe, delta, and unchanged-frame paths. */
@@ -1035,6 +1097,7 @@ int main(int argc, char** argv)
     failures += !check_png_interop(tmp_png);
     failures += !check_metadata();
     failures += !check_adaptive();
+    failures += !check_fast_decode_excludes_adaptive();
     failures += !check_anim();
 
     /* Progressive encode must never pick BCIF, and must stream row by row. */
@@ -1050,6 +1113,15 @@ int main(int argc, char** argv)
        the last byte -- this is the actual progressive-loading guarantee. */
     failures += !check_stream_one("rgb8_big_prog", 512, 400, 3, 1,
                                   PXL_ENCODE_PROGRESSIVE, PXL_FILTER_BCIF, 0, 0xFF);
+    /* Fast-decode encode must also never pick BCIF (same fixtures as above,
+       different flag -- ADAPTIVE exclusion is covered separately since none
+       of these fixtures select it in the first place). */
+    failures += !check_stream_one("gray8_fast",  100, 80, 1, 1,
+                                  PXL_ENCODE_FAST_DECODE, PXL_FILTER_BCIF, 0, 0xFF);
+    failures += !check_stream_one("rgb8_fast",   128, 96, 3, 1,
+                                  PXL_ENCODE_FAST_DECODE, PXL_FILTER_BCIF, 0, 0xFF);
+    failures += !check_stream_one("rgba8_fast",  128, 96, 4, 1,
+                                  PXL_ENCODE_FAST_DECODE, PXL_FILTER_BCIF, 0, 0xFF);
     /* Flat-color content makes PXL_FILTER_NONE win, which is the only way to
        exercise the unfiltered row path in the streaming decoder. */
     failures += !check_stream_one("rgb8_none",   128, 96, 3, 1,

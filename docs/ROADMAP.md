@@ -28,8 +28,10 @@ decoder never looks at it. See [`RESEARCH.md`](RESEARCH.md).
 Answered 2026-09-16 and rejected as a default: the cheap probe does *not* rank
 the candidates the way the full level does, disagreeing on 4-13% of files, so
 the byte-identical output the idea rested on is not available. The closest safe
-variant buys only 1.09-1.37x. Left open as a possible `PXL_ENCODE_FAST` opt-in,
-with the measurement recorded so it need not be repeated. See
+variant buys only 1.09-1.37x. Left open as a possible `PXL_ENCODE_FAST` opt-in
+(encode speed; not implemented, and not to be confused with the unrelated,
+shipped `PXL_ENCODE_FAST_DECODE` below, which trades size for a decode-speed
+guarantee), with the measurement recorded so it need not be repeated. See
 [`RESEARCH.md`](RESEARCH.md).
 
 ### Then freeze
@@ -215,6 +217,14 @@ Not scheduled, but not forgotten.
   target-hardware throughput), still not acted on: the encoder does pick
   BCIF on `sketch`, so removing it is not free on line art, and the one
   hardware sample so far is one console, one image pattern.
+
+  **Partial mitigation shipped 2026-09-17**: `-s` / `PXL_ENCODE_FAST_DECODE`
+  (see RESEARCH.md) lets a caller opt BCIF (and ADAPTIVE) out at encode time,
+  for 2.9% more size on real UI content. That is a user-facing escape hatch,
+  not a resolution of this question — BCIF is still the *default* choice for
+  photographic content, so anyone not already reaching for `-s`/`-p` still
+  gets it, and removing BCIF from the format outright remains a separate,
+  bigger decision from adding a flag that lets people avoid it.
 - **A better test oracle.** PIL ignores `tRNS` on grayscale and palette images,
   which already produced one phantom bug that cost real time to retract. If the
   suite grows over PngSuite, compare with `magick compare -metric AE` or against

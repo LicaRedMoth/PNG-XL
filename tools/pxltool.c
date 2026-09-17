@@ -109,7 +109,9 @@ static int cmd_compress(const char* in, const char* out, int level, unsigned fla
     printf("%s -> %s\n", in, out);
     printf("  %ux%u, %u channel(s), %u-bit\n",
            img.width, img.height, img.channels, img.bytes_per_channel * 8);
-    if (flags & PXL_ENCODE_PROGRESSIVE) {
+    if (flags & PXL_ENCODE_FAST_DECODE) {
+        printf("  fast decode    : yes ({none, delta} only -- also streams top-to-bottom)\n");
+    } else if (flags & PXL_ENCODE_PROGRESSIVE) {
         printf("  progressive    : yes (row-wise filter only)\n");
     }
     if (img.metadata.size) {
@@ -341,12 +343,12 @@ static void usage(void)
     fprintf(stderr,
         "pxltool (PNG XL) %s\n"
         "Usage:\n"
-        "  pxltool c     in.png  out.pxl  [-l LEVEL] [-p]  compress PNG  -> PXL\n"
-        "  pxltool d     in.pxl  out.png                   decompress PXL  -> PNG\n"
-        "  pxltool info  in.pxl                            print .pxl header\n"
-        "  pxltool ca    in.apng out.apxl [-l LEVEL]       compress APNG -> APXL\n"
-        "  pxltool da    in.apxl out.apng                  decompress APXL -> APNG\n"
-        "  pxltool ainfo in.apxl                           print .apxl header\n"
+        "  pxltool c     in.png  out.pxl  [-l LEVEL] [-p] [-s]  compress PNG  -> PXL\n"
+        "  pxltool d     in.pxl  out.png                        decompress PXL  -> PNG\n"
+        "  pxltool info  in.pxl                                 print .pxl header\n"
+        "  pxltool ca    in.apng out.apxl [-l LEVEL]            compress APNG -> APXL\n"
+        "  pxltool da    in.apxl out.apng                       decompress APXL -> APNG\n"
+        "  pxltool ainfo in.apxl                                print .apxl header\n"
         "\n"
         "  -l LEVEL   zstd compression level, %d..%d (still default %d, anim %d).\n"
         "             Higher = smaller but slower. Values above %d are clamped.\n"
@@ -355,7 +357,12 @@ static void usage(void)
         "             matching (enabled at level >= 10).\n"
         "  -p         progressive: pick only row-wise filters (never BCIF) so the\n"
         "             file decodes top-to-bottom as it downloads. Usually a little\n"
-        "             larger on photos, where BCIF would otherwise win.\n",
+        "             larger on photos, where BCIF would otherwise win.\n"
+        "  -s         fast decode: pick only {none, delta}, the two filters measured\n"
+        "             to always decode faster than libpng (BCIF loses to it outright\n"
+        "             at texture sizes despite winning at screen size; adaptive only\n"
+        "             ties it). Costs more size than the default -- 2.9%% measured on\n"
+        "             real UI screenshots -- for a decode-speed guarantee. Implies -p.\n",
         pxl_version(), 1, PXL_LEVEL_MAX, PXL_LEVEL_DEFAULT, APXL_LEVEL_DEFAULT,
         PXL_LEVEL_MAX);
 }
@@ -378,6 +385,8 @@ int main(int argc, char** argv)
         for (i = 4; i < argc; ++i) {
             if (strcmp(argv[i], "-p") == 0) {
                 flags |= PXL_ENCODE_PROGRESSIVE;
+            } else if (strcmp(argv[i], "-s") == 0) {
+                flags |= PXL_ENCODE_FAST_DECODE;
             } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
                 level = atoi(argv[++i]);
                 if (level > PXL_LEVEL_MAX) {

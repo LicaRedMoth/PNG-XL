@@ -189,6 +189,23 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_stages PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# What excluding ADAPTIVE, on top of what -p already excludes (BCIF), would
+# cost in file size -- see bench/adaptivecost.c for why this needed
+# measuring rather than reasoning from the PSP throughput numbers alone.
+add_executable(pxl_bench_adaptivecost bench/adaptivecost.c
+                                      src/pxl_codec_common.c
+                                      src/pxl_png.c
+                                      src/pxl_pngio.c
+                                      src/pxl_meta.c
+                                      src/pxl_io.c)
+target_include_directories(pxl_bench_adaptivecost PRIVATE src)
+target_link_libraries(pxl_bench_adaptivecost PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_adaptivecost PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_adaptivecost PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 # Generates psp/testdata.h: one valid .pxl file per (size, color filter) pair,
 # forced (not chosen by the encoder) so the PSP program can exercise all four,
 # plus one PNG per size (libpng's own default settings) as the baseline the

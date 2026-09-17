@@ -334,10 +334,10 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
         zstd_level = PXL_LEVEL_MAX;
     }
 
-    /* Build the candidate filter list. We always try the adaptive PNG-style
-       filter (it matches or beats a single global filter on almost any image),
-       the generic delta, and no filter at all; for 8-bit RGB/RGBA we also try
-       BCIF. The smallest compressed result wins.
+    /* Build the candidate filter list. We always try the generic delta and no
+       filter at all; the adaptive PNG-style filter and, for 8-bit RGB/RGBA,
+       BCIF join them unless FAST_DECODE says otherwise. The smallest
+       compressed result among the candidates tried wins.
 
        "No filter" is not redundant: on palette images the samples are labels
        rather than magnitudes, so every differencing filter turns a smooth image
@@ -349,10 +349,18 @@ pxl_buffer pxl_encode_ex(const pxl_image* img, int zstd_level, unsigned flags)
        resolved in favor of the faster decode. */
     candidates[n_candidates++] = PXL_FILTER_NONE;
     candidates[n_candidates++] = PXL_FILTER_DELTA;
-    candidates[n_candidates++] = PXL_FILTER_ADAPTIVE;
+    /* ADAPTIVE only ties libpng's decode speed rather than beating it (measured
+       on real PSP hardware, docs/BENCHMARKS.md 2026-09-17), so FAST_DECODE
+       drops it: every remaining candidate is one PXL has measured to always
+       decode faster than libpng, which is the guarantee FAST_DECODE exists to
+       make. */
+    if (!(flags & PXL_ENCODE_FAST_DECODE)) {
+        candidates[n_candidates++] = PXL_FILTER_ADAPTIVE;
+    }
     /* BCIF splits into color planes, which breaks top-to-bottom streaming, so
-       the progressive flag excludes it. */
-    if (!(flags & PXL_ENCODE_PROGRESSIVE) && pal_count == 0 &&
+       PROGRESSIVE excludes it; it also loses outright to libpng at texture
+       sizes despite winning at screen size, so FAST_DECODE excludes it too. */
+    if (!(flags & (PXL_ENCODE_PROGRESSIVE | PXL_ENCODE_FAST_DECODE)) && pal_count == 0 &&
         choose_filter(img->channels, (uint8_t)(depth / 8u)) == PXL_FILTER_BCIF) {
         candidates[n_candidates++] = PXL_FILTER_BCIF;
     }
