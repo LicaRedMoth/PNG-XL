@@ -36,6 +36,12 @@ pxl_interop_tmp.png
 # bench/synthetic_png.sh. Not committed for the same reason USC-SIPI is not:
 # the script reproduces it, and a few hundred megabytes do not belong in git.
 /tests/data/Synthetic-Screenshots/
+# Freely-licensed animated GIFs from Wikimedia Commons, fetched by
+# bench/gif_corpus.sh -- a corpus for the indexed-animation question in
+# ROADMAP.md (GIF is always <=256 colours/frame, so any animated GIF is
+# indexed-friendly content .apxl currently has no format for). Not committed
+# for the same reason as the screenshot corpus above: the script reproduces it.
+/tests/data/Animated-GIFs/
 # CLIC 2020 mobile training split: 1048 high-resolution photographs, 3.8 GB.
 /tests/data/CLIC-2020-mobile-train/
 # Anita: an industrial animation dataset. 16871 PNG frames in 367 shots, 11 GB.

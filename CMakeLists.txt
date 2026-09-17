@@ -325,6 +325,17 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_ldmsweep PRIVATE ${PXL_ZSTD_INCLUDE})
 endif()
 
+# Compresses an arbitrary raw file with apxl_encode's real default zstd
+# parameters -- lets an experiment on a byte layout apxl_encode never
+# produces (e.g. indexed animation frames) be scored by the same compression
+# a real .apxl file would get, without reimplementing apxl_encode's container.
+add_executable(pxl_bench_rawzstd bench/rawzstd.c)
+target_link_libraries(pxl_bench_rawzstd PRIVATE pxl)
+target_include_directories(pxl_bench_rawzstd PRIVATE src)
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_rawzstd PRIVATE ${PXL_ZSTD_INCLUDE})
+endif()
+
 # Which per-row filters the adaptive filter actually picks, over a corpus.
 # Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
 # the row-filter helpers are static.
