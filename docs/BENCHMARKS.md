@@ -1580,3 +1580,74 @@ from x86: on the one real PSP measured so far, BCIF's one-shot decode is 5.3x
 slower per byte at a texture-realistic size than its own screen-sized number
 would predict. Recorded here; whether to act on it is a project decision, not
 something this measurement settles by itself.
+
+---
+
+## 2026-09-17 — the missing clock: 222 MHz, same PSP-3008
+
+- **Commit:** `1ab9f8a`
+- **Hardware / method:** same as the entry above — the previous run's firmware
+  setting pinned the CPU to 333 MHz regardless of what the program requested.
+  The user found and changed that setting; both sweeps in this run came back
+  **222 MHz actual** (the mirror image of last time — the pin just moved to
+  the other end), so this closes the gap the previous entry left open rather
+  than replacing it.
+
+### Decode throughput, 222 MHz actual, 786 432 bytes free at the time
+
+| size | filter | median µs (15 reps, both runs) | MB/s |
+|---|---|---:|---:|
+| screen 480x272 (522 240 B) | none | 37 509 – 37 626 | 13.24 – 13.28 |
+| screen 480x272 | delta | 38 470 – 38 480 | 12.94 – 12.95 |
+| screen 480x272 | adaptive | 106 031 – 106 050 | 4.70 |
+| screen 480x272 | bcif | 36 737 – 36 743 | 13.56 |
+| texture 512x512 (1 048 576 B) | none | 60 837 – 60 847 | 16.44 |
+| texture 512x512 | delta | 71 001 – 71 005 | 14.08 |
+| texture 512x512 | adaptive | 209 227 – 209 256 | 4.78 |
+| texture 512x512 | **bcif** | **397 305 – 397 321** | **2.52** |
+
+This is the pair `ROADMAP.md`'s "measure decode on the target hardware" entry
+asked for — both clocks, both sizes, all four filters, on real Allegrex
+silicon. Between this run and the previous entry, every (size, filter) cell
+now has a genuine reading at both 222 and 333 MHz.
+
+### Cross-check: does decode time scale the way clock speed predicts?
+
+333/222 = 1.5x. Comparing this run's median to the previous entry's, cell by
+cell:
+
+| size | filter | 222 MHz µs | 333 MHz µs | ratio |
+|---|---|---:|---:|---:|
+| screen | none | 37 568 | 24 829 | 1.513 |
+| screen | delta | 38 475 | 25 533 | 1.507 |
+| screen | adaptive | 106 041 | 70 427 | 1.506 |
+| screen | bcif | 36 740 | 24 275 | 1.514 |
+| texture | none | 60 842 | 40 056 | 1.519 |
+| texture | delta | 71 003 | 47 099 | 1.508 |
+| texture | adaptive | 209 242 | 139 242 | 1.503 |
+| texture | bcif | 397 313 | 260 209 | 1.527 |
+
+All eight cells land within 1.5-1.9% of the 1.5x the clock ratio predicts —
+a tight band across four very different code paths (a bare `memcpy`-scale
+pass for `none` up to `bcif`'s four-plane read), which is itself a useful
+sanity check on the measurement: 15-rep medians on real hardware are
+reproducing a real physical ratio this precisely, not chasing noise.
+
+**Caveat, so this isn't oversold**: `scePowerSetClockFrequency`'s 222 MHz
+setting is pllfreq/cpufreq/busfreq = 222/222/111, and 333 MHz is 333/333/166
+— bus frequency scales by 166/111 = 1.495x, almost exactly the CPU's 1.5x.
+Because both scale together here, this comparison cannot separate "decode is
+CPU-bound" from "decode is memory-bus-bound" — it rules out neither. What it
+does rule out is a large clock-independent fixed cost (memory-stick I/O, OS
+scheduling overhead) dominating any of these numbers, since a fixed cost
+would pull the ratio toward 1.0, not sit it at 1.5.
+
+### BCIF's anomaly is not a clock artifact
+
+The texture/screen BCIF ratio is **10.72x at 333 MHz and 10.81x at 222 MHz**
+— the same anomaly, within 1%, at a completely different clock and bus
+speed. That rules out the previous entry's finding being some artifact of
+333 MHz specifically (a resonance, a clock-transition glitch, anything tied
+to that one frequency); whatever is happening scales with the algorithm's
+memory access pattern, not with clock speed, which is exactly what a
+cache/TLB explanation would predict and a clock-related one would not.

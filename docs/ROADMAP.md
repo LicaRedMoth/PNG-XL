@@ -70,42 +70,47 @@ corpus and sampling in the figure itself — an unlabelled chart is worse than n
 chart, because it travels further before anyone checks it.
 
 
-### Measure decode on the target hardware
+### Done — decode measured on the target hardware
 
-Everything claimed about the PSP-class target so far is arithmetic, not
-measurement. The decoder fits in flash (174 KB of `.text`) and the still path
-now decodes in roughly the size of its output, but **no number in this project
-was ever taken on the hardware it is aimed at**, and throughput is the one
-figure that cannot be derived from the x86 runs.
+Everything claimed about the PSP-class target used to be arithmetic, not
+measurement — the decoder fits in flash (174 KB of `.text`) and the still
+path decodes in roughly the size of its output, but **no number in this
+project had ever been taken on the hardware it is aimed at**, and throughput
+was the one figure that could not be derived from the x86 runs.
 
-**Code-risk side closed 2026-09-16**: the decoder cross-compiles for MIPS with
-`psp-gcc`/PSPSDK unchanged, and decodes every filter bit-exact under
+**Code-risk side closed 2026-09-16**: the decoder cross-compiles for MIPS
+with `psp-gcc`/PSPSDK unchanged, and decodes every filter bit-exact under
 `PPSSPPHeadless` — see [`psp/README.md`](../psp/README.md).
 
 **Measured on real hardware 2026-09-17**, a PSP-3008: decode throughput in
-MB/s for a 480x272 screen and a 512x512 texture, split by filter, all twelve
-correctness cases bit-exact on actual Allegrex silicon first. Numbers and
-method in `BENCHMARKS.md`'s "first decode measurement on the target hardware"
-entry. Two things came out of it that were not known going in:
+MB/s for a 480x272 screen and a 512x512 texture, split by filter, **at both
+222 and 333 MHz**, all twelve correctness cases bit-exact on actual Allegrex
+silicon first. The two clocks came from two separate runs — the console's
+firmware pins the CPU clock regardless of what the app requests, and pinned
+to the opposite end each time, which is how both ends of the ask got covered
+without ever confirming the app's own `scePowerSetClockFrequency` call does
+anything on this particular firmware. Numbers and method in `BENCHMARKS.md`'s
+two "decode measurement on the target hardware" entries.
 
-- **Still only one clock.** The program requested 222 MHz for one sweep and
-  333 for the other, and both came back 333 actual — this console's firmware
-  appears to pin the clock regardless of what the app asks for. A genuine
-  222 MHz reading is still open; it needs either a firmware setting that lets
-  the app's request through, or a different console.
+Two things came out of it that were not known going in, and are worth
+carrying forward:
+
 - **BCIF scales badly with size on this CPU specifically.** 5.3x slower than
-  a linear prediction from its own screen-sized number, reproduced twice to
-  four significant figures, invisible on every x86 measurement this project
-  has taken. See the "Removing BCIF" entry below and the BENCHMARKS.md write-up
+  a linear prediction from its own screen-sized number at 333 MHz, and the
+  same anomaly within 1% at 222 MHz — clock-independent, so not a fluke of
+  one frequency, and invisible on every x86 measurement this project has
+  taken. See the "Removing BCIF" entry below and the BENCHMARKS.md write-up
   for what's known and what's still a hypothesis (likely cache/TLB pressure
-  from reading four separated planes at once — not confirmed, no PSP profiling
-  tooling exists yet to confirm it).
+  from reading four separated planes at once — not confirmed, no PSP
+  profiling tooling exists yet to confirm it).
+- **The clock-scaling cross-check came out clean.** Every one of the eight
+  (size, filter) cells scaled within 1.5-1.9% of the 1.5x that 333/222 MHz
+  predicts, which is a useful confirmation that 15-rep medians on this
+  hardware are precise enough to trust for future PSP measurements, not just
+  this one.
 
-What's left of the original ask: a genuine 222 MHz data point, on this
-console or another. No further code work blocks it — `psp/build.sh` and the
-existing `EBOOT.PBP` are already what a re-run needs.
-
-Two things that would follow a good result, both already half-built:
+Two things that would follow naturally now that a real result exists, both
+already half-built:
 
 - **Decode straight into a GPU texture.** The row window added for the memory
   work writes each row into the caller's buffer as it lands, so an output-format
@@ -118,9 +123,9 @@ Two things that would follow a good result, both already half-built:
   at all. For UI art that is a quarter of the memory and the bus traffic.
 
 Note BCIF is excluded from all of the above: its plane split completes no row
-until the last byte, so it cannot stream into a texture. That is now the third
-independent argument against it, after size on the wider corpus and the memory
-result — see [`RESEARCH.md`](RESEARCH.md).
+until the last byte, so it cannot stream into a texture. That was already the
+third independent argument against it, and the hardware-throughput result
+above added a fourth — see the "Removing BCIF" entry in Held, below.
 
 
 ### Corpus gaps, now that the capture folders are known
