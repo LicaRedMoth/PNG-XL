@@ -162,6 +162,22 @@ cannot currently describe) and a corpus of natively-565 PSP textures this
 project does not have yet, so it stays a recorded, evidenced option rather
 than a plan.
 
+### Re-verify decoder size on MIPS, not just x86
+
+Raised 2026-09-17, while checking whether WebP could even run on PSP (see the
+RESEARCH.md entry of the same name) — the check needed a PXL-on-MIPS decoder
+size to compare against, and building one surfaced this: `bench/mindec_pxl.c`
+cross-compiled at this project's own Release flags (`-O3 -DNDEBUG`) came to
+**267 696 bytes** of MIPS `.text`, against the **174 066** this project has
+published as "decoder size — met" everywhere from README to BENCHMARKS.md.
+That figure was gcc/x86 only and was never re-taken on the actual target,
+exactly the gap decode speed had until this session's PSP work closed it.
+54% is not a rounding difference; "met" needs re-checking against a real
+MIPS number before it is trusted further. Not yet done through this
+project's real build pipeline (CMake, the full `pxlcore` target) — the
+267 696 figure is from a quick hand-linked check, good enough to show the gap
+exists, not yet rigorous enough for BENCHMARKS.md.
+
 
 ### Corpus gaps, now that the capture folders are known
 

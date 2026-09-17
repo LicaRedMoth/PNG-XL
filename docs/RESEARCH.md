@@ -1092,3 +1092,64 @@ never been lossy anywhere gains its first lossy-adjacent input path (lossless
 new failure mode to explain in the spec, not in the encoder). Left open
 rather than accepted or rejected; revisit with an actual corpus of
 natively-565 PSP game textures, which this project does not have yet.
+
+---
+
+### Does WebP even run on PSP? Checked instead of assumed
+**Raised 2026-09-17**: README already says WebP lossless beats PXL on both
+size and speed on synthetic stills (measured on x86). Before that comparison
+is treated as settled for the actual target, it needed the same question
+every other x86 number in this project has had to answer: does it hold on
+MIPS, or is x86 an adjacent proxy again.
+
+**libwebp cross-compiles for PSP, but not out of the box.** Its CMake build
+hardcodes `POSITION_INDEPENDENT_CODE ON` in two places (once for the whole
+project when `WEBP_LINK_STATIC` is set, which is the default; once directly
+on the decoder's OBJECT library targets, unconditionally, "because it is not
+ON by default") — `psp-gcc`'s `-mabi=eabi` cannot generate PIC at all, an
+ordinary property of bare-metal/embedded MIPS toolchains. Both had to be
+patched out by hand to get a build; there is no pspdev portlib for webp the
+way there already is for libpng, so this patching is real, currently-undone
+work, not a checkbox. Once past that, it built and linked clean.
+
+**Functional correctness, confirmed under `PPSSPPHeadless`** (after also
+discovering, the hard way, that a hand-linked PSP ELF needs `psp-fixup-imports`
+run on it or every kernel-import call jumps into unpatched stub space and
+crashes on the first syscall — CMake's `create_pbp_file` macro already does
+this for `psp_psp_bench`, but a manual `psp-gcc` link does not): `WebPDecodeRGBA`
+on an embedded lossless WebP file decoded to the correct 480x272 with no
+crash. WebP genuinely can run on this target; the user's suspicion that it
+might not was reasonable given no PSP port exists today, but wrong on the
+merits.
+
+**Decoder size, MIPS, both at `-O3 -DNDEBUG`** (this project's own Release
+flags, `bench/mindec_pxl.c` for PXL, `WebPDecodeRGBA` for WebP, `psp-size`'s
+`.text` column):
+
+| decoder | MIPS `.text` |
+|---|---:|
+| PXL (minimal decode-only) | 267 696 |
+| WebP (`WebPDecodeRGBA`, VP8+VP8L combined) | 295 660 |
+
+PXL is 9.5% smaller here, but the comparison favours PXL more than it should:
+`WebPDecodeRGBA` is a format-sniffing dispatcher that statically reaches both
+the lossy VP8 decoder and the lossless VP8L one, and libwebp's public API has
+no lossless-only entry point to call instead, so this number carries lossy
+decode code no real use of it here would need. The true lossless-only
+footprint is unmeasured and likely smaller than 295 660 — this table is
+therefore inconclusive on decoder size, not a PXL win, and should not be
+quoted as one.
+
+**The finding that actually matters more than the WebP comparison**: PXL's
+own MIPS decoder is **267 696 bytes**, against the published x86 figure of
+**174 066** — 54% bigger on the real target than the number "decoder size —
+met" has stood on. That x86 number was never re-verified on MIPS, exactly the
+category of gap this project already found and fixed once for decode speed.
+Filed as its own ROADMAP item; this project's own decoder-size claim needs
+the same target-hardware treatment WebP's speed-and-size claim was just given,
+before either can be trusted.
+
+**Status: informative, not a decision.** Nothing here is committed to the
+project (the libwebp source and patches used for this check are not
+vendored) — this answers "would it even work" and "roughly how big," which is
+what was asked, not "should PXL be replaced with WebP for this."
