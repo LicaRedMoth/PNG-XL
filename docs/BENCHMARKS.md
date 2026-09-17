@@ -1502,3 +1502,81 @@ compressing four.
 
 **The trade that is actually on offer** is probe 3 with top-1: 1.5x to 2.3x
 encode speed for 0.06% to 0.35% of size, varying by content.
+
+---
+
+## 2026-09-17 — first decode measurement on the target hardware: PSP-3008
+
+- **Commit:** `aa533c6`
+- **Hardware:** PSP-3008 ("Bright"), real Allegrex silicon — not `PPSSPPHeadless`,
+  not arithmetic. First number this project has ever taken on its own target.
+- **Method:** `psp/main.c` (see `psp/README.md`), three sizes (64x64 smoke,
+  480x272 screen, 512x512 texture) × four filters, correctness checked
+  bit-exact against `psp/pattern.h` before any timing counted, median of 15
+  `sceRtcGetCurrentTick` deltas per (size, filter) cell.
+
+**The clock did not do what was asked.** The program requested 222 MHz for
+the first sweep and 333 MHz for the second via `scePowerSetClockFrequency`,
+and printed back what `scePowerGetCpuClockFrequencyInt()` actually reported:
+both sweeps came back **333 MHz actual**. This is not a measurement glitch —
+the two runs agree on every number to within 0.03%, which is exactly what a
+real repeat at one identical clock looks like. This console's custom firmware
+apparently pins the CPU clock regardless of what the application requests;
+the user had independently found 333 MHz set in their firmware before this
+run. There is therefore **no 222 MHz data point yet** — every number below is
+at 333 MHz, and this is exactly the kind of thing a measurement must state
+about itself rather than let a table imply it swept both clocks when it did
+not.
+
+### Decode throughput, 333 MHz actual, 786 432 bytes free at the time
+
+| size | filter | median µs (15 reps, both runs) | MB/s |
+|---|---|---:|---:|
+| screen 480x272 (522 240 B) | none | 24 746 – 24 912 | 19.99 – 20.13 |
+| screen 480x272 | delta | 25 530 – 25 536 | 19.50 – 19.51 |
+| screen 480x272 | adaptive | 70 426 – 70 427 | 7.07 |
+| screen 480x272 | bcif | 24 274 – 24 275 | 20.52 |
+| texture 512x512 (1 048 576 B) | none | 40 045 – 40 067 | 24.96 – 24.97 |
+| texture 512x512 | delta | 47 097 – 47 100 | 21.23 |
+| texture 512x512 | adaptive | 139 237 – 139 247 | 7.18 |
+| texture 512x512 | **bcif** | **260 205 – 260 212** | **3.84** |
+
+Ranges are the two independent runs (nominally "222 MHz" and "333 MHz"
+requested), both actually at 333 MHz.
+
+### BCIF does not scale linearly on this CPU
+
+Texture has 2.008x the pixels of screen. `none`, `delta` and `adaptive` all
+land close to that or better (amortised fixed overhead making the larger size
+faster per byte, not slower): none scales 1.61x, delta 1.84x, adaptive 1.98x
+— adaptive in particular is almost exactly linear, as its per-row Paeth pass
+should be. **BCIF scales 10.72x** for the same 2.008x increase in pixels. A
+plain linear (2.008x) prediction from its own screen-sized time puts texture
+BCIF at roughly 48 700 µs; it actually takes 260 208 — **5.3x slower than
+linear scaling predicts**.
+
+`unpack_bcif4` (`src/pxl_codec_decode.c`) is a single linear pass with no
+quadratic loop, so this is not an algorithmic complexity problem — it has to
+be a hardware effect. The function reads four separate planes (Y, U, V, A)
+that sit `width*height` bytes apart in the compressed frame and writes one
+interleaved RGBA stream, so every pixel touches four widely-separated read
+locations plus one write location per iteration. The likely explanation is
+the CPU's cache or TLB losing track of that many concurrent streams once the
+working set crosses some threshold between 522 KB and 1 MB — Allegrex has a
+small, simple cache with nothing like an x86's reach, which is exactly why
+this was invisible in every x86 measurement this project has taken so far.
+**This is a hypothesis, not a confirmed mechanism** — profiling it needs
+tooling this project has not set up for the PSP. What is not a hypothesis is
+the number itself: reproduced twice, agreeing to four significant figures.
+
+### What this adds to the BCIF question
+
+The "Removing BCIF" item in `ROADMAP.md` has stood on three arguments —
+decoder size (since retracted: BCIF was not what bloated the decoder),
+streaming (its plane split completes no row until the last byte, so it
+cannot stream into a texture), and size on the wider corpus. This is a
+fourth, and the first to come from the target hardware itself rather than
+from x86: on the one real PSP measured so far, BCIF's one-shot decode is 5.3x
+slower per byte at a texture-realistic size than its own screen-sized number
+would predict. Recorded here; whether to act on it is a project decision, not
+something this measurement settles by itself.

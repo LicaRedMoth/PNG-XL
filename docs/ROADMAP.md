@@ -82,33 +82,28 @@ figure that cannot be derived from the x86 runs.
 `psp-gcc`/PSPSDK unchanged, and decodes every filter bit-exact under
 `PPSSPPHeadless` — see [`psp/README.md`](../psp/README.md).
 
-**Confirmed on real hardware 2026-09-17**, a PSP-3008: all twelve correctness
-cases (three sizes × four filters) came back bit-exact on actual Allegrex
-silicon, not an emulator. The throughput sweep at both 222 and 333 MHz (added
-the same day, after the hardware check) has not yet had its numbers pulled
-off the console and into this table — an emulator's timing is the emulator's
-own JIT speed, not the 222/333 MHz Allegrex core, and this project has already
-published two numbers that were plausible and wrong from measuring
-an adjacent thing by mistake (see `RESEARCH.md`) — an emulator figure reported
-as hardware would be a third. What's left is purely "get a PSP in hand and run
-`psp/build.sh` + copy `EBOOT.PBP` over" — no further code work blocks it.
+**Measured on real hardware 2026-09-17**, a PSP-3008: decode throughput in
+MB/s for a 480x272 screen and a 512x512 texture, split by filter, all twelve
+correctness cases bit-exact on actual Allegrex silicon first. Numbers and
+method in `BENCHMARKS.md`'s "first decode measurement on the target hardware"
+entry. Two things came out of it that were not known going in:
 
-What to measure, on the console: decode throughput in MB/s at both 222 and
-333 MHz, for a 480x272 RGBA8888 screen (522 KB) and a 512x512 texture (1 MB),
-split by filter. The split matters because the filters differ enormously here —
-with NONE, zstd decompresses straight into the destination and there is no
-unfilter pass at all, while ADAPTIVE costs a Paeth pass per row on a CPU with no
-SIMD and a small cache. Peak memory does *not* need the console: it is
-deterministic and already known (output buffer + one row + zstd's window).
+- **Still only one clock.** The program requested 222 MHz for one sweep and
+  333 for the other, and both came back 333 actual — this console's firmware
+  appears to pin the clock regardless of what the app asks for. A genuine
+  222 MHz reading is still open; it needs either a firmware setting that lets
+  the app's request through, or a different console.
+- **BCIF scales badly with size on this CPU specifically.** 5.3x slower than
+  a linear prediction from its own screen-sized number, reproduced twice to
+  four significant figures, invisible on every x86 measurement this project
+  has taken. See the "Removing BCIF" entry below and the BENCHMARKS.md write-up
+  for what's known and what's still a hypothesis (likely cache/TLB pressure
+  from reading four separated planes at once — not confirmed, no PSP profiling
+  tooling exists yet to confirm it).
 
-**On testing with a PSP-3000 rather than a 1000.** The CPU is identical — same
-Allegrex, same clocks — so throughput transfers exactly, and throughput is the
-unknown. Only the memory ceiling differs, and that is neutralised by allocating
-ballast at startup so the app runs inside a fat-sized budget. The test must
-print the free memory it saw and the budget it enforced, the same way
-`bench/bench.sh` prints the load average it ran under: a measurement that does
-not state its conditions is the failure mode this project has already been
-burned by twice.
+What's left of the original ask: a genuine 222 MHz data point, on this
+console or another. No further code work blocks it — `psp/build.sh` and the
+existing `EBOOT.PBP` are already what a re-run needs.
 
 Two things that would follow a good result, both already half-built:
 
@@ -202,10 +197,15 @@ Anita covers.
 
 Not scheduled, but not forgotten.
 
-- **Removing BCIF.** Still open as a format simplification. The decoder-size
-  motive is gone — measurement showed BCIF was not what bloated the decoder —
-  so it needs a fresh reason. Note the encoder does pick BCIF on `sketch`, so
-  removing it is not free on line art.
+- **Removing BCIF.** The decoder-size motive is gone — measurement showed
+  BCIF was not what bloated the decoder. But 2026-09-17's PSP-3008 run gave
+  it a fresh one: BCIF's one-shot decode scales 5.3x worse than a linear
+  prediction between a screen-sized and a texture-sized image, on real
+  Allegrex hardware, reproduced twice — see BENCHMARKS.md. That is now a
+  fourth independent argument (decoder size retracted, texture streaming,
+  wider-corpus size, and now this), still not acted on: the encoder does pick
+  BCIF on `sketch`, so removing it is not free on line art, and the one
+  hardware sample so far is one console, one image pattern.
 - **A better test oracle.** PIL ignores `tRNS` on grayscale and palette images,
   which already produced one phantom bug that cost real time to retract. If the
   suite grows over PngSuite, compare with `magick compare -metric AE` or against
