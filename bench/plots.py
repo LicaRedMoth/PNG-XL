@@ -201,6 +201,94 @@ def plot_formats(label, rows, outdir):
            os.path.join(outdir, "formats_%s.png" % label))
 
 
+DECODER_LABELS = {
+    "none": "PXL none", "delta": "PXL delta",
+    "adaptive": "PXL adaptive", "bcif": "PXL bcif", "png": "libpng",
+}
+DECODER_ORDER = ["none", "delta", "adaptive", "bcif", "png"]
+
+
+def plot_psp_throughput(rows, outdir):
+    """PXL against libpng, decoding the same pixels on real PSP hardware.
+
+    Grouped by size rather than one bar per (size, decoder): the point is
+    that BCIF is competitive at screen size and not at texture size, which
+    only reads as a shape if screen and texture sit next to each other for
+    every decoder, not scattered across the axis by decoder name.
+    """
+    clock = "333"
+    by = {(r["size"], r["decoder"]): float(r["mb_per_s"])
+          for r in rows if r["clock_mhz"] == clock}
+    decoders = [d for d in DECODER_ORDER if ("screen", d) in by]
+    fig, ax = plt.subplots(figsize=(7.2, 4.2))
+    x = range(len(decoders))
+    w = 0.36
+    screen_vals = [by[("screen", d)] for d in decoders]
+    texture_vals = [by[("texture", d)] for d in decoders]
+    b1 = ax.bar([i - w / 2 for i in x], screen_vals, width=w,
+               color=SERIES[0], label="screen, 480x272", zorder=3)
+    b2 = ax.bar([i + w / 2 for i in x], texture_vals, width=w,
+               color=SERIES[1], label="texture, 512x512", zorder=3)
+    for bars in (b1, b2):
+        for bar in bars:
+            h = bar.get_height()
+            ax.annotate(f"{h:.1f}", (bar.get_x() + bar.get_width() / 2, h),
+                        textcoords="offset points", xytext=(0, 4),
+                        fontsize=7.5, ha="center", color=INK)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([DECODER_LABELS[d] for d in decoders])
+    ax.set_ylabel("decode, MB/s of RGBA8888 output")
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+    # BCIF at texture is the one bar that should not be read as "PXL wins" --
+    # a light red wash makes the crossover visible without a second legend.
+    if "bcif" in decoders:
+        i = decoders.index("bcif")
+        ax.axvspan(i - 0.5, i + 0.5, color="#e0433a", alpha=0.07, zorder=0)
+    finish(fig, ax,
+           "PXL against libpng on a real PSP-3008, 333 MHz",
+           "Same pixels, real hardware, both decoded to RGBA8888. PXL leads "
+           "libpng 2.8-3.5x on none/delta\nand ties it on adaptive -- BCIF "
+           "crosses over and loses to libpng at texture size (docs/BENCHMARKS.md).",
+           os.path.join(outdir, "psp_throughput.png"))
+
+
+def plot_psp_scaling(rows, outdir):
+    """How decode time scales from screen (130560 px) to texture (262144 px)
+    -- 2.008x the pixels -- per decoder, at 333 MHz.
+
+    This is the chart that makes the BCIF anomaly a shape instead of a
+    sentence: every other bar sits at or under the dashed reference line
+    (linear in pixel count); BCIF's does not, by a wide margin.
+    """
+    clock = "333"
+    us = {(r["size"], r["decoder"]): float(r["us_median"])
+          for r in rows if r["clock_mhz"] == clock}
+    decoders = [d for d in DECODER_ORDER if ("screen", d) in us]
+    ratios = [us[("texture", d)] / us[("screen", d)] for d in decoders]
+    pixel_ratio = 262144 / 130560
+
+    fig, ax = plt.subplots(figsize=(6.6, 3.8))
+    colors = ["#c23f8a" if d == "bcif" else SERIES[0] for d in decoders]
+    bars = ax.bar(range(len(decoders)), ratios, color=colors, zorder=3)
+    for bar, r in zip(bars, ratios):
+        ax.annotate(f"{r:.1f}x", (bar.get_x() + bar.get_width() / 2, r),
+                    textcoords="offset points", xytext=(0, 4),
+                    fontsize=8, ha="center", color=INK, weight="bold")
+    ax.axhline(pixel_ratio, color=GRID, linewidth=1.4, linestyle="--", zorder=1)
+    ax.annotate("2.01x pixels (linear scaling)", xy=(len(decoders) - 1, pixel_ratio),
+                xytext=(0, 6), textcoords="offset points",
+                fontsize=7.5, color="#666666", ha="right")
+    ax.set_xticks(range(len(decoders)))
+    ax.set_xticklabels([DECODER_LABELS[d] for d in decoders])
+    ax.set_ylabel("texture time / screen time")
+    finish(fig, ax,
+           "BCIF does not scale linearly on real Allegrex hardware",
+           "Texture has 2.01x the pixels of screen; every PXL filter and "
+           "libpng land within 2% of that.\nBCIF takes 10.7x longer for the "
+           "same data -- a hardware effect, not algorithmic (docs/BENCHMARKS.md).",
+           os.path.join(outdir, "psp_bcif_scaling.png"))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     made = 0
@@ -217,6 +305,10 @@ def main():
                     if r.get("decoder") and r["decoder"] != "decoder"]
         if rows:
             plot_formats(label, rows, OUT); made += 1
+    psp_rows = read("psp_throughput.tsv")
+    if psp_rows:
+        plot_psp_throughput(psp_rows, OUT); made += 1
+        plot_psp_scaling(psp_rows, OUT); made += 1
     if not made:
         print("no data files under", DATA, file=sys.stderr)
         return 1

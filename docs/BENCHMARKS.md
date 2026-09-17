@@ -1569,6 +1569,8 @@ this was invisible in every x86 measurement this project has taken so far.
 tooling this project has not set up for the PSP. What is not a hypothesis is
 the number itself: reproduced twice, agreeing to four significant figures.
 
+![BCIF does not scale linearly on real Allegrex hardware](img/psp_bcif_scaling.png)
+
 ### What this adds to the BCIF question
 
 The "Removing BCIF" item in `ROADMAP.md` has stood on three arguments —
@@ -1713,6 +1715,8 @@ BCIF's time. This is the same non-linear scaling already recorded, now shown
 against a baseline rather than only against PXL's own other filters: it is
 not merely "BCIF scales worse than it should," it is "BCIF scales badly
 enough to lose the comparison this project exists to win."
+
+![PXL against libpng on a real PSP-3008, 333 MHz](img/psp_throughput.png)
 
 This adds directly to the "Removing BCIF" question in `ROADMAP.md`: a filter
 that is competitive at one size and loses to the format being replaced at
