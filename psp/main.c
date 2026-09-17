@@ -419,6 +419,45 @@ static int run_output_format_correctness(void)
     return all_ok;
 }
 
+/* pxl_convert_palette on real MIPS output, same independent-reference cross-
+   check as tests/roundtrip.c's check_convert_palette() -- a hand-built
+   4-entry palette, no encoded file needed, since the function reads
+   img->palette/palette_alpha directly. */
+static int run_convert_palette_correctness(void)
+{
+    static const uint8_t pal[4 * 3] = {
+        255,255,255,  0,0,0,  128,64,32,  10,20,30
+    };
+    static const uint8_t alpha[4] = { 255, 0, 200, 128 };
+    pxl_image img;
+    uint8_t want[8], got[8];
+    unsigned i;
+    size_t n;
+    int ok = 1;
+
+    memset(&img, 0, sizeof img);
+    img.palette.data = (unsigned char*)pal;
+    img.palette.size = sizeof pal;
+    img.palette_alpha.data = (unsigned char*)alpha;
+    img.palette_alpha.size = sizeof alpha;
+
+    n = pxl_convert_palette(&img, PXL_OUTPUT_RGBA5551, got);
+    for (i = 0; i < 4; i++) {
+        uint8_t rgba[4] = { pal[i*3+0], pal[i*3+1], pal[i*3+2], alpha[i] };
+        uint8_t w[2];
+        unsigned v = ((unsigned)(rgba[0] >> 3) << 11) |
+                     ((unsigned)(rgba[1] >> 3) << 6) |
+                     ((unsigned)(rgba[2] >> 3) << 1) |
+                     (unsigned)(rgba[3] >> 7);
+        w[0] = (uint8_t)v; w[1] = (uint8_t)(v >> 8);
+        want[i * 2 + 0] = w[0]; want[i * 2 + 1] = w[1];
+    }
+    ok = (n == 8) && memcmp(got, want, 8) == 0;
+    putf("[palette  RGBA5551] %zu bytes -- %s\n", n, ok ? "MATCH" : "MISMATCH");
+    put(ok ? "convert_palette: ALL OK\n\n" : "convert_palette: SOME FAILED\n\n");
+    return ok;
+}
+
 /* Median decode time over REPS repetitions of one (size, filter) case, and
    the resulting throughput in MB/s of decoded (output) bytes. Correctness was
    already checked in run_correctness(), so this only times. */
@@ -597,6 +636,7 @@ int main(void)
 
     all_ok = run_correctness();
     all_ok = run_output_format_correctness() && all_ok;
+    all_ok = run_convert_palette_correctness() && all_ok;
 
     /* Only meaningful if the pixels were actually right -- a fast wrong
        answer is not a result. */

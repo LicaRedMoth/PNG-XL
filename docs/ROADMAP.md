@@ -131,10 +131,22 @@ Two things that would follow naturally now that a real result exists:
   hardware. Swizzled output (an 8-row window instead of 1) is not done;
   nothing needs it without a concrete texture-cache-locality case to measure
   against, and one-row PXL_OUTPUT_* conversion did not need it either.
-- **Indexed mode maps onto the hardware.** The GE reads 4- and 8-bit palettised
-  textures with a CLUT natively, and `.pxl` already stores indices packed with
-  the palette in its own section, so an indexed file needs no expansion to RGBA
-  at all. For UI art that is a quarter of the memory and the bus traffic.
+- **Done 2026-09-18 — indexed mode maps onto the hardware.** Confirmed against
+  `pspgu.h` directly rather than from memory: `GU_PSM_T4`/`T8` are real,
+  documented `sceGuTexMode` formats, and 5650/5551/4444/8888 are marked valid
+  CLUT formats as well as texture ones. An indexed `.pxl`'s index bytes
+  already need no conversion at all — `pxl_decode()` without
+  `pxl_image_expand()` hands back exactly the packed indices `GU_PSM_T4`/`T8`
+  read. `pxl_convert_palette(img, fmt, out)` closes the one remaining gap,
+  the palette itself (≤256 entries, reusing `pxl_stream_new_ex`'s own bit
+  math since a palette entry and a pixel are the same conversion): a caller
+  now needs zero conversion code to get from an indexed `.pxl` to a texture
+  the GE samples directly. For UI art that is a quarter of the memory and the
+  bus traffic of the equivalent RGBA8888 texture. Verified against an
+  independent reference on both x86 (`tests/roundtrip.c`) and real MIPS
+  output (`psp/main.c`, headless-checked). (`GU_PSM_DXT1/3/5` constants also
+  exist in `pspgu.h`, but are absent from `sceGuTexMode`'s own documented
+  format list — not something this project is relying on.)
 
 Note BCIF is excluded from all of the above: its plane split completes no row
 until the last byte, so it cannot stream into a texture. That was already the

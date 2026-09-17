@@ -502,6 +502,27 @@ yet verified is whether the conversion costs anything over a plain
 `pxl_decode()` on the actual console; `psp/main.c`'s `strm565` throughput row
 exists to answer that once real hardware is available.
 
+**Indexed images need this for the palette only.** The GE's `GU_PSM_T4`/`T8`
+texture formats read packed indices directly — `pxl_decode()` without
+`pxl_image_expand()` already hands those back with no conversion needed at
+all — and `pspgu.h` marks `5650`/`5551`/`4444`/`8888` valid CLUT formats as
+well as texture ones, so the one remaining piece is the palette itself:
+
+```c
+size_t n = pxl_convert_palette(img, PXL_OUTPUT_RGB565, clut_buf);
+```
+
+`fmt` must not be `PXL_OUTPUT_NATIVE` (a palette entry is always 3 or 4 plain
+bytes on disk — there is no packed "native" layout to pass through the way a
+pixel row has one). `clut_buf` needs `pxl_palette_count(img) * (fmt ==
+PXL_OUTPUT_RGBA8888 ? 4 : 2)` bytes; entries past the end of `palette_alpha`
+(or when it is empty) read fully opaque, the same default the row conversion
+above uses. Returns 0 if `img` is not indexed. Reuses the exact same
+conversion the row callback does — a palette entry and a pixel are the same
+bit math — so there was nothing left to write twice, just call it once
+(a palette arrives in full before any pixel rows; there is nothing
+progressive about converting it).
+
 ## Library API
 
 ```c
@@ -522,6 +543,11 @@ int              pxl_stream_feed(pxl_stream* s, const void* data, size_t len);
 const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready);
 int              pxl_stream_finish(pxl_stream* s);
 void             pxl_stream_free(pxl_stream* s);
+
+/* indexed images: convert the palette to the same packed formats -- see
+   "Decoding straight into a GPU's native texture format" above */
+size_t           pxl_convert_palette(const pxl_image* img, pxl_output_format fmt,
+                                     unsigned char* out);
 ```
 
 All four filters are tried at encode time and the smallest result is kept.

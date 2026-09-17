@@ -116,6 +116,8 @@ correctness: ALL OK
 [texture  RGB565  ] 512 rows -- MATCH
 [texture  RGBA5551] 512 rows -- MATCH
 streaming output-format: ALL OK
+[palette  RGBA5551] 8 bytes -- MATCH
+convert_palette: ALL OK
 -- throughput at 222 MHz requested, 222 MHz actual, 786432 bytes free --
   screen   none     median  16814 us over 15 reps, 522240 bytes ->   29.621 MB/s
   ...
@@ -132,6 +134,8 @@ Saved to results.txt next to this EBOOT. Press X to exit
 ```
 
 `streaming output-format conversion` checks `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/`RGBA5551` conversion row-by-row against a MIPS-side reference computed independently of the decoder's own `convert_row` (same cross-check `tests/roundtrip.c` does on the host) -- this is [ROADMAP.md](../docs/ROADMAP.md)'s "decode straight into a GPU texture" item, verified for correctness here; `strm565` in the throughput sweep is its speed, still emulator-untrustworthy like every other timing on this page, but the number to read once real hardware is available: does converting every row as it streams cost anything over a plain `pxl_decode()`, or does it come for free inside the existing per-row write.
+
+`convert_palette` is the same cross-check for `pxl_convert_palette` -- the piece that closes indexed mode onto the hardware entirely: an indexed `.pxl`'s index bytes already need no conversion (`GU_PSM_T4`/`T8` read them as-is), so once the palette is packed too there is nothing left to convert by hand between an indexed file and a texture the GE samples directly.
 
 `MATCH` means the MIPS-compiled decoder (PXL's four filters, or libpng for the
 `png` row) reconstructed the exact source pixels for that size — a `memcmp`

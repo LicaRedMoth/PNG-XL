@@ -182,6 +182,29 @@ typedef enum {
     PXL_OUTPUT_RGBA4444
 } pxl_output_format;
 
+/* Converts an indexed image's palette into a packed CLUT in the same layout
+   pxl_stream_new_ex's row conversion uses -- the PSP GE's texture formats
+   (5650/5551/4444/8888) are also its only palette formats, and the index
+   bytes an indexed .pxl decodes to already need no conversion at all (they
+   are exactly what GU_PSM_T4/T8 read), so a palette this size is the entire
+   remaining gap between an indexed .pxl and a texture the GE can sample
+   directly. Unlike row conversion this is not part of the streaming API: a
+   palette arrives once, in full, before any pixel rows, so there is nothing
+   progressive about converting it -- call it once img->palette is populated
+   (from pxl_decode(), or from pxl_stream_image() once its geometry is valid)
+   and reuse the result for as many draws as the palette is used in.
+
+   `fmt` must not be PXL_OUTPUT_NATIVE (there is no "native packed CLUT"
+   layout to pass through, unlike a pixel row -- RGB/palette entries are
+   always 3 or 4 plain bytes on disk). `out` must hold
+   pxl_palette_count(img) * (fmt == PXL_OUTPUT_RGBA8888 ? 4 : 2) bytes.
+   Entries beyond palette_alpha's length (or when it is empty) read fully
+   opaque, the same default pxl_stream_new_ex's row conversion uses for a
+   3-channel source. Returns the number of bytes written, or 0 if img is not
+   indexed or fmt is PXL_OUTPUT_NATIVE. */
+size_t pxl_convert_palette(const pxl_image* img, pxl_output_format fmt,
+                           unsigned char* out);
+
 typedef struct pxl_stream pxl_stream;
 
 /* Create a streaming decoder. cb may be NULL (rows still accumulate in the

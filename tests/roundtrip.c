@@ -752,6 +752,70 @@ static int check_output_format_rejects_bad_geometry(void)
     return ok;
 }
 
+/* pxl_convert_palette: a 4-entry palette (with alpha), converted under
+   RGB565 (alpha ignored) and RGBA5551 (alpha used), checked against
+   expected_565/expected_5551 -- the same independent-of-convert_row
+   reference the row-conversion tests above already use, since a palette
+   entry and a pixel go through the exact same bit math. Does not need an
+   encoded file at all: pxl_convert_palette reads img->palette/palette_alpha
+   directly, which a hand-built pxl_image already has. */
+static int check_convert_palette(void)
+{
+    static const uint8_t pal[4 * 3] = {
+        255,255,255,  0,0,0,  128,64,32,  10,20,30
+    };
+    static const uint8_t alpha[4] = { 255, 0, 200, 128 };
+    pxl_image img;
+    uint8_t want[8], got[8];
+    size_t n;
+    int i, ok = 1;
+
+    memset(&img, 0, sizeof img);
+    img.palette.data = (unsigned char*)pal;
+    img.palette.size = sizeof pal;
+
+    n = pxl_convert_palette(&img, PXL_OUTPUT_RGB565, got);
+    for (i = 0; i < 4; i++) {
+        expected_565(pal[i*3+0], pal[i*3+1], pal[i*3+2], want + i*2);
+    }
+    if (n != 8 || memcmp(got, want, 8) != 0) {
+        printf("[FAIL] convert_palette: RGB565 mismatch (n=%zu)\n", n);
+        ok = 0;
+    } else {
+        printf("[ OK ] convert_palette: RGB565, 4 entries, no alpha buffer\n");
+    }
+
+    img.palette_alpha.data = (unsigned char*)alpha;
+    img.palette_alpha.size = sizeof alpha;
+    n = pxl_convert_palette(&img, PXL_OUTPUT_RGBA5551, got);
+    for (i = 0; i < 4; i++) {
+        expected_5551(pal[i*3+0], pal[i*3+1], pal[i*3+2], alpha[i], want + i*2);
+    }
+    if (n != 8 || memcmp(got, want, 8) != 0) {
+        printf("[FAIL] convert_palette: RGBA5551 mismatch (n=%zu)\n", n);
+        ok = 0;
+    } else {
+        printf("[ OK ] convert_palette: RGBA5551, 4 entries, alpha used\n");
+    }
+
+    if (pxl_convert_palette(&img, PXL_OUTPUT_NATIVE, got) != 0) {
+        printf("[FAIL] convert_palette: PXL_OUTPUT_NATIVE should be rejected\n");
+        ok = 0;
+    } else {
+        printf("[ OK ] convert_palette: PXL_OUTPUT_NATIVE correctly rejected\n");
+    }
+
+    img.palette.size = 0; /* no longer indexed */
+    if (pxl_convert_palette(&img, PXL_OUTPUT_RGB565, got) != 0) {
+        printf("[FAIL] convert_palette: non-indexed image should be rejected\n");
+        ok = 0;
+    } else {
+        printf("[ OK ] convert_palette: non-indexed image correctly rejected\n");
+    }
+
+    return ok;
+}
+
 /* Truncated and corrupt inputs must be rejected, not silently accepted. */
 static int check_stream_errors(void)
 {
@@ -1331,6 +1395,7 @@ int main(int argc, char** argv)
     failures += !check_output_format_rgba();
     failures += !check_output_format_rgb_no_alpha();
     failures += !check_output_format_rejects_bad_geometry();
+    failures += !check_convert_palette();
     failures += !check_stream_errors();
     failures += !check_bad_filter_geometry();
 

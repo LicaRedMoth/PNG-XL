@@ -760,6 +760,38 @@ static void convert_row(pxl_output_format fmt, const uint8_t* src, uint8_t* out,
     }
 }
 
+/* Public: converts an indexed image's palette to a packed CLUT. Reuses
+   convert_row one entry at a time (width=1, 4 "channels": every palette
+   entry is treated as one RGBA pixel, with alpha filled opaque when
+   palette_alpha is absent or shorter than the palette) rather than
+   duplicating its bit math a third time. */
+size_t pxl_convert_palette(const pxl_image* img, pxl_output_format fmt,
+                           unsigned char* out)
+{
+    unsigned count = pxl_palette_count(img);
+    unsigned unit, i;
+    const unsigned char* pal;
+    const unsigned char* alpha;
+
+    if (fmt == PXL_OUTPUT_NATIVE || count == 0 || !out) {
+        return 0;
+    }
+    pal = img->palette.data;
+    alpha = (img->palette_alpha.data && img->palette_alpha.size >= count)
+                ? img->palette_alpha.data : NULL;
+    unit = (fmt == PXL_OUTPUT_RGBA8888) ? 4u : 2u;
+
+    for (i = 0; i < count; ++i) {
+        uint8_t rgba[4];
+        rgba[0] = pal[(size_t)i * 3 + 0];
+        rgba[1] = pal[(size_t)i * 3 + 1];
+        rgba[2] = pal[(size_t)i * 3 + 2];
+        rgba[3] = alpha ? alpha[i] : 0xFFu;
+        convert_row(fmt, rgba, out + (size_t)i * unit, 1, 4);
+    }
+    return (size_t)count * unit;
+}
+
 /* Routes one decoded row to the caller's callback, converting it first if an
    output format other than NATIVE was requested. Shared by stream_emit_rows
    (the row-progressive path) and pxl_stream_finish's BCIF path, which is the
