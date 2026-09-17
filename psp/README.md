@@ -7,12 +7,14 @@ the measurement [`ROADMAP.md`](../docs/ROADMAP.md)'s "measure decode on the
 target hardware" entry asks for, with something to compare PXL's numbers
 against rather than reporting them next to nothing.
 
-**Verified on real hardware 2026-09-17, PSP-3008**, both clocks: all
-correctness cases came back bit-exact, and PXL's numbers at both 222 and
-333 MHz are in `BENCHMARKS.md` — see its "decode measurement on the target
-hardware" entries. **The libpng row is new since that run** and does not have
-a hardware number yet; see
-[Getting the numbers into BENCHMARKS.md](#getting-the-numbers-into-benchmarksmd).
+**Verified on real hardware 2026-09-17, PSP-3008**, both clocks, PXL and
+libpng both: all correctness cases came back bit-exact, and every number
+(both formats, both sizes, both clocks) is in `BENCHMARKS.md` — see its
+"decode measurement on the target hardware" entries, most recently "the
+comparison the numbers above had nothing against: libpng". PXL beats libpng
+2.8-3.5x on three of its four filters; the fourth, BCIF, does too at screen
+size but **loses to libpng at texture size** — see the "Removing BCIF" entry
+in `ROADMAP.md`'s Held section for what that adds up to.
 
 ## One-time setup
 
@@ -173,14 +175,15 @@ bit-exact at every size, on the real target's instruction set.
 Copy `psp/build/EBOOT.PBP` to `ms0:/PSP/GAME/PXLBENCH/EBOOT.PBP`, run it, wait
 for (or skip past, with X) the 15-second pause, then pull `results.txt` from
 the same folder over USB Connect or a memory-stick read. That file has the
-real Allegrex numbers at both clocks, split by size and filter (now including
-libpng), with the actual clock and free memory it ran under printed alongside
--- state those next to the numbers in `BENCHMARKS.md`, the same way
+real Allegrex numbers at both clocks, split by size and filter (PXL's four
+and libpng), with the actual clock and free memory it ran under printed
+alongside -- state those next to the numbers in `BENCHMARKS.md`, the same way
 `bench/bench.sh` states the load average it ran under. A measurement that
 does not state its conditions is a failure mode this project has already
 been burned by twice.
 
-PXL's own numbers at both clocks are already recorded; what a fresh run adds
-is the `png` row next to them, which is the whole point of building it --
-"PXL decodes at N MB/s on a PSP" means little without "and libpng decodes
-the same pixels at M MB/s on the same PSP" beside it.
+Every number this program prints is already in `BENCHMARKS.md` as of
+2026-09-17. A fresh run now is a reproducibility check, not a gap-filler --
+and the last one landed within 0.2% of the recorded numbers despite the
+binary growing from 528 KB to 919 KB in between, which is itself worth
+knowing before trusting any of this further.

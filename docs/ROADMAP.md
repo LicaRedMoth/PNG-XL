@@ -203,12 +203,16 @@ Anita covers.
 Not scheduled, but not forgotten.
 
 - **Removing BCIF.** The decoder-size motive is gone — measurement showed
-  BCIF was not what bloated the decoder. But 2026-09-17's PSP-3008 run gave
-  it a fresh one: BCIF's one-shot decode scales 5.3x worse than a linear
-  prediction between a screen-sized and a texture-sized image, on real
-  Allegrex hardware, reproduced twice — see BENCHMARKS.md. That is now a
-  fourth independent argument (decoder size retracted, texture streaming,
-  wider-corpus size, and now this), still not acted on: the encoder does pick
+  BCIF was not what bloated the decoder. But 2026-09-17's PSP-3008 runs gave
+  it two fresh ones. First, BCIF's one-shot decode scales 5.3x worse than a
+  linear prediction between a screen-sized and a texture-sized image, on real
+  Allegrex hardware, reproduced twice. Second, weighed against libpng rather
+  than only against PXL's own other filters: BCIF beats libpng 2.9x at
+  screen size like the rest of PXL does, but **loses to libpng at texture
+  size** (0.54x — libpng decodes the same pixels in about half the time) —
+  see BENCHMARKS.md for both. That is now a fourth independent argument
+  (decoder size retracted, texture streaming, wider-corpus size, and now
+  target-hardware throughput), still not acted on: the encoder does pick
   BCIF on `sketch`, so removing it is not free on line art, and the one
   hardware sample so far is one console, one image pattern.
 - **A better test oracle.** PIL ignores `tRNS` on grayscale and palette images,

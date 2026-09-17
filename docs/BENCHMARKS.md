@@ -1651,3 +1651,70 @@ speed. That rules out the previous entry's finding being some artifact of
 to that one frequency); whatever is happening scales with the algorithm's
 memory access pattern, not with clock speed, which is exactly what a
 cache/TLB explanation would predict and a clock-related one would not.
+
+---
+
+## 2026-09-17 — the comparison the numbers above had nothing against: libpng
+
+- **Commit:** `8264653`
+- **Hardware / method:** same PSP-3008, same three sizes, plus one PNG per
+  size (same pixels, libpng's own default write settings, not tuned for
+  either side) decoded through the identical `png_set_expand`/`strip_16`/
+  `gray_to_rgb`/`add_alpha` normalisation to RGBA8888 that
+  `bench/formatdec.c` uses on x86, so this MB/s means the same thing as the
+  PXL rows next to it. Two more full runs, one landing at 333 MHz actual and
+  one at 222 MHz actual (same firmware-pins-the-clock behaviour as before).
+
+### Reproducibility, before trusting anything else
+
+Every PXL number in these two new runs was already measured once, three days
+apart, on a rebuilt binary that grew from 528 KB to 919 KB (statically
+linking libpng and zlib). If that growth had disturbed anything -- cache
+layout, memory placement -- it would show up here:
+
+| cell | previous run | this run | difference |
+|---|---:|---:|---:|
+| screen none, 333 MHz | 24 829 µs | 24 872.5 µs | 0.18% |
+| texture bcif, 333 MHz | 260 208.5 µs | 260 245.5 µs | 0.01% |
+| screen none, 222 MHz | 37 567.5 µs | 37 629.5 µs | 0.16% |
+| texture bcif, 222 MHz | 397 313 µs | 397 322.5 µs | 0.002% |
+
+Nothing moved by more than 0.2%. The measurement is trustworthy enough to
+build a comparison on.
+
+### PXL vs libpng, same pixels, same PSP, both clocks
+
+Ratio is libpng's median divided by PXL's — above 1 means PXL is faster.
+
+| size | filter | ratio at 333 MHz | ratio at 222 MHz |
+|---|---|---:|---:|
+| screen | none | 2.87x | 2.87x |
+| screen | delta | 2.79x | 2.80x |
+| screen | adaptive | 1.01x | 1.02x |
+| screen | bcif | 2.94x | 2.94x |
+| texture | none | 3.51x | 3.50x |
+| texture | delta | 2.99x | 3.00x |
+| texture | adaptive | 1.01x | 1.02x |
+| texture | **bcif** | **0.54x** | **0.54x** |
+
+Three of PXL's four filters beat libpng on this hardware by roughly the same
+margin the x86 tables already show (2.8x-3.5x for none/delta, matching the
+~2-4.8x range measured there). `adaptive` essentially ties libpng (1.01-1.02x)
+rather than beating it -- both are doing a comparable per-row predictor pass
+over 8-bit samples, so landing close to parity with the format PXL is
+compared against, on the CPU where that pass is most expensive, is a
+sensible result rather than a surprising one.
+
+**BCIF is the exception, and it is a bad one.** At screen size BCIF is still
+2.94x faster than libpng, in line with the other filters. At texture size,
+where the anomaly from the previous entry lives, **BCIF is slower than
+libpng** -- 0.54x, meaning libpng decodes the same pixels in about half
+BCIF's time. This is the same non-linear scaling already recorded, now shown
+against a baseline rather than only against PXL's own other filters: it is
+not merely "BCIF scales worse than it should," it is "BCIF scales badly
+enough to lose the comparison this project exists to win."
+
+This adds directly to the "Removing BCIF" question in `ROADMAP.md`: a filter
+that is competitive at one size and loses to the format being replaced at
+another, on the actual target hardware, is a harder case to leave alone than
+"5.3x slower than its own linear prediction" was by itself.
