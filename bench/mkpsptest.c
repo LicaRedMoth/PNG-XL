@@ -42,6 +42,13 @@
     the generated header under 1.5 MB rather than the ~9.6 MB a screen- and
     texture-sized raw reference image would cost as hex text.
 
+    Also emits one PNG per size, same pixels, default libpng write settings
+    (whatever filter/compression libpng picks on its own -- this is a
+    baseline, not a best case for either side) -- so psp/main.c has something
+    to compare PXL's decode throughput against, the same way BENCHMARKS.md's
+    x86 tables always carry libpng alongside PXL rather than reporting a
+    number with nothing to hold it up against.
+
     Usage:
       bench/mkpsptest > psp/testdata.h
 */
@@ -49,6 +56,9 @@
 #include "../src/pxl_codec_encode.c"
 #include "../psp/pattern.h"
 
+#include <png.h>
+
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +164,70 @@ static void emit_array(const char* name, const unsigned char* data, size_t len)
     printf("static const unsigned int %s_len = %uu;\n\n", name, (unsigned)len);
 }
 
+typedef struct { unsigned char* data; size_t size, cap; } mem_writer;
+
+static void png_write_mem(png_structp p, png_bytep data, png_size_t len)
+{
+    mem_writer* w = (mem_writer*)png_get_io_ptr(p);
+    if (w->size + len > w->cap) {
+        size_t ncap = w->cap ? w->cap * 2 : 4096;
+        while (ncap < w->size + len) {
+            ncap *= 2;
+        }
+        w->data = (unsigned char*)realloc(w->data, ncap);
+        w->cap = ncap;
+    }
+    memcpy(w->data + w->size, data, len);
+    w->size += len;
+}
+
+static void png_flush_mem(png_structp p) { (void)p; }
+
+/* Same raw pixels as encode_forced() sees, written as an ordinary PNG with
+   libpng's own default filter/compression choices -- this is the baseline
+   psp/main.c's libpng decode reads back, not a hand-picked best case. */
+static pxl_buffer encode_png(const uint8_t* raw, uint32_t w, uint32_t h)
+{
+    pxl_buffer out = { NULL, 0 };
+    png_structp p = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    png_infop info = p ? png_create_info_struct(p) : NULL;
+    mem_writer mw = { NULL, 0, 0 };
+    png_bytep* rows = NULL;
+    uint32_t y;
+
+    if (!p || !info) {
+        goto fail;
+    }
+    if (setjmp(png_jmpbuf(p))) {
+        goto fail;
+    }
+    png_set_write_fn(p, &mw, png_write_mem, png_flush_mem);
+    png_set_IHDR(p, info, w, h, 8, PNG_COLOR_TYPE_RGB_ALPHA, PNG_INTERLACE_NONE,
+                PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(p, info);
+    rows = (png_bytep*)malloc((size_t)h * sizeof(png_bytep));
+    if (!rows) {
+        goto fail;
+    }
+    for (y = 0; y < h; y++) {
+        rows[y] = (png_bytep)(raw + (size_t)y * w * 4);
+    }
+    png_write_image(p, rows);
+    png_write_end(p, NULL);
+    free(rows);
+    png_destroy_write_struct(&p, &info);
+    out.data = mw.data;
+    out.size = mw.size;
+    return out;
+fail:
+    free(rows);
+    free(mw.data);
+    if (p) {
+        png_destroy_write_struct(&p, info ? &info : NULL);
+    }
+    return out;
+}
+
 static uint8_t* make_pattern(uint32_t w, uint32_t h)
 {
     uint8_t* raw = (uint8_t*)malloc((size_t)w * h * 4);
@@ -214,6 +288,18 @@ int main(void)
 
         fprintf(stderr, "%-8s %ux%u, %zu raw bytes\n", sizes[si].name,
                 sizes[si].w, sizes[si].h, img.buffer.size);
+
+        {
+            pxl_buffer png = encode_png(raw, sizes[si].w, sizes[si].h);
+            if (!png.data) {
+                fprintf(stderr, "error: PNG encode of '%s' failed\n", sizes[si].name);
+                return 1;
+            }
+            fprintf(stderr, "  %-8s -> %zu PNG bytes\n", "png", png.size);
+            snprintf(name, sizeof name, "pxl_psp_%s_png", sizes[si].name);
+            emit_array(name, png.data, png.size);
+            free(png.data);
+        }
 
         for (ci = 0; ci < sizeof filters / sizeof filters[0]; ci++) {
             pxl_buffer enc = encode_forced(&img, PXL_LEVEL_DEFAULT, filters[ci].filter);

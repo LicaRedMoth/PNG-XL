@@ -1,14 +1,17 @@
 # PSP decode benchmark
 
 A cross-compiled MIPS build of the decoder for the actual target hardware
-this project is aimed at: a correctness check across three sizes and four
-filters, then a decode-throughput sweep at both 222 and 333 MHz — the
-measurement [`ROADMAP.md`](../docs/ROADMAP.md)'s "measure decode on the
-target hardware" entry asks for.
+this project is aimed at: a correctness check across three sizes, PXL's four
+filters and libpng, then a decode-throughput sweep at both 222 and 333 MHz —
+the measurement [`ROADMAP.md`](../docs/ROADMAP.md)'s "measure decode on the
+target hardware" entry asks for, with something to compare PXL's numbers
+against rather than reporting them next to nothing.
 
-**Verified on real hardware 2026-09-17, PSP-3008.** All twelve correctness
-cases (three sizes × four filters) came back bit-exact. The throughput
-numbers from that run are not yet in `BENCHMARKS.md` — see
+**Verified on real hardware 2026-09-17, PSP-3008**, both clocks: all
+correctness cases came back bit-exact, and PXL's numbers at both 222 and
+333 MHz are in `BENCHMARKS.md` — see its "decode measurement on the target
+hardware" entries. **The libpng row is new since that run** and does not have
+a hardware number yet; see
 [Getting the numbers into BENCHMARKS.md](#getting-the-numbers-into-benchmarksmd).
 
 ## One-time setup
@@ -37,22 +40,27 @@ psp/build.sh
 
 `psp/testdata.h` is generated, not hand-written — see
 [`bench/mkpsptest.c`](../bench/mkpsptest.c) for what it embeds and why: one
-valid `.pxl` file per (size, filter) pair, forced through that filter rather
-than encoder-chosen, so all four get exercised at every size. It's committed
-so `psp/build.sh` alone is enough day to day. It does *not* embed the
-reference images to check decodes against — [`pattern.h`](pattern.h) holds
-the one formula that generates them, shared between the host generator and
-`main.c`'s correctness check, which is what keeps the generated header under
-1.5 MB rather than the several megabytes a screen- and texture-sized raw
-reference image would cost as hex text.
+valid `.pxl` file per (size, filter) pair (forced through that filter rather
+than encoder-chosen, so all four get exercised at every size) plus one PNG
+per size, same pixels, libpng's own default write settings — a baseline, not
+a best case for either side. It's committed so `psp/build.sh` alone is enough
+day to day. It does *not* embed the reference images to check decodes
+against — [`pattern.h`](pattern.h) holds the one formula that generates them,
+shared between the host generator and `main.c`'s correctness check, which is
+what keeps the generated header under 2 MB rather than the several megabytes
+a screen- and texture-sized raw reference image would cost as hex text.
 
 `psp/build.sh` cross-compiles [`main.c`](main.c) together with the same
 decode-only source set [`wasm/build.sh`](../wasm/build.sh) uses (no
 `pxl_codec_encode.c`, since this only ever decodes), against PSPSDK's newlib
 instead of the wasm build's freestanding shim — the PSP has a real libc, so
-`pxl_decode()` is called directly with no wrapper. Output is a plain ELF
-(`psp/build/pxl_psp_bench`, no extension — the toolchain doesn't add one) and
-a ready `EBOOT.PBP`.
+`pxl_decode()` is called directly with no wrapper. libpng is a pspdev portlib
+(`png16`/`z`, already in the toolchain, nothing this project vendors or
+builds), decoded through the identical `png_set_expand`/`strip_16`/
+`gray_to_rgb`/`add_alpha` normalisation to RGBA8888 that
+[`bench/formatdec.c`](../bench/formatdec.c) uses on x86, so the two MB/s
+numbers mean the same thing. Output is a plain ELF (`psp/build/pxl_psp_bench`,
+no extension — the toolchain doesn't add one) and a ready `EBOOT.PBP`.
 
 ## Running
 
@@ -77,29 +85,36 @@ PXL PSP decode benchmark, libpxl 1.5.0
 [smoke    delta   ] 64x64 4ch 16384 bytes -- MATCH
 [smoke    adaptive] 64x64 4ch 16384 bytes -- MATCH
 [smoke    bcif    ] 64x64 4ch 16384 bytes -- MATCH
+[smoke    png     ] 64x64 4ch 16384 bytes -- MATCH
 [screen   none    ] 480x272 4ch 522240 bytes -- MATCH
 [screen   delta   ] 480x272 4ch 522240 bytes -- MATCH
 [screen   adaptive] 480x272 4ch 522240 bytes -- MATCH
 [screen   bcif    ] 480x272 4ch 522240 bytes -- MATCH
+[screen   png     ] 480x272 4ch 522240 bytes -- MATCH
 [texture  none    ] 512x512 4ch 1048576 bytes -- MATCH
 [texture  delta   ] 512x512 4ch 1048576 bytes -- MATCH
 [texture  adaptive] 512x512 4ch 1048576 bytes -- MATCH
 [texture  bcif    ] 512x512 4ch 1048576 bytes -- MATCH
+[texture  png     ] 512x512 4ch 1048576 bytes -- MATCH
 correctness: ALL OK
 -- throughput at 222 MHz requested, 222 MHz actual, 786432 bytes free --
   screen   none     median  16814 us over 15 reps, 522240 bytes ->   29.621 MB/s
   ...
+  screen   png      median  82197 us over 15 reps, 522240 bytes ->    6.059 MB/s
+  ...
 -- throughput at 333 MHz requested, 333 MHz actual, 786432 bytes free --
-  screen   none     median  11433 us over 15 reps, 522240 bytes ->   43.562 MB/s
+  screen   none     median  11388 us over 15 reps, 522240 bytes ->   43.734 MB/s
+  ...
+  screen   png      median  54757 us over 15 reps, 522240 bytes ->    9.096 MB/s
   ...
 Saved to results.txt next to this EBOOT. Press X to exit
 ```
 
-`MATCH` means the MIPS-compiled decoder reconstructed the exact source pixels
-for that (size, filter) pair — a `memcmp` against pixels re-derived from
-`pattern.h`, not a checksum, so there is no hash collision to worry about.
-The throughput sweep only runs if every correctness case passed; a fast wrong
-answer is not a result.
+`MATCH` means the MIPS-compiled decoder (PXL's four filters, or libpng for the
+`png` row) reconstructed the exact source pixels for that size — a `memcmp`
+against pixels re-derived from `pattern.h`, not a checksum, so there is no
+hash collision to worry about. The throughput sweep only runs if every
+correctness case passed; a fast wrong answer is not a result.
 
 ### Where the output actually goes
 
@@ -135,26 +150,37 @@ On real hardware: copy `psp/build/EBOOT.PBP` to
 
 ## Why the headless numbers are not the answer
 
-`PPSSPPHeadless`'s throughput figures time **the emulator's own JIT on an x86
-box**, not the 222/333 MHz Allegrex core -- notice they don't even change
-between the "222 MHz" and "333 MHz" sections above, because
-`scePowerSetClockFrequency` there only changes what
-`scePowerGetCpuClockFrequencyInt()` reports back, not anything the host CPU
-actually runs at. This project already published two numbers that were
-plausible and wrong (see [`RESEARCH.md`](../docs/RESEARCH.md)) from measuring
-an adjacent thing and trusting it by mistake; an emulator timing presented as
-a hardware figure would be the same error a third time. What the headless run
-does establish is everything *except* the number itself: the codec
-cross-compiles for MIPS, links against PSPSDK's newlib, and decodes every
-filter bit-exact at every size, on the real target's instruction set.
+`PPSSPPHeadless`'s throughput figures time **the emulator's own model of
+Allegrex timing, computed on an x86 box**, not real Allegrex silicon --
+notice they scale by almost exactly 1.5x between the "222 MHz" and "333 MHz"
+sections above (screen/none: 16814 vs 11388 µs, ratio 1.48; the other rows
+land between 1.48 and 1.56), which is `scePowerSetClockFrequency`'s own
+333/222 ratio. That is the emulator's internal cycle-accounting responding to
+the clock it was told to pretend to run at -- the underlying x86 host obviously
+does not get physically faster when a PSP program asks for a higher clock.
+It looking exactly like a hardware clock-scaling result is what makes it
+dangerous, not reassuring: this project already published two numbers that
+were plausible and wrong (see [`RESEARCH.md`](../docs/RESEARCH.md)) from
+measuring an adjacent thing and trusting it by mistake, and a synthetic
+number that scales the way a real one would is a more convincing version of
+that same error, not a less convincing one. What the headless run does
+establish is everything *except* the number itself: the codec cross-compiles
+for MIPS, links against PSPSDK's newlib, and decodes every filter and libpng
+bit-exact at every size, on the real target's instruction set.
 
 ## Getting the numbers into BENCHMARKS.md
 
 Copy `psp/build/EBOOT.PBP` to `ms0:/PSP/GAME/PXLBENCH/EBOOT.PBP`, run it, wait
 for (or skip past, with X) the 15-second pause, then pull `results.txt` from
 the same folder over USB Connect or a memory-stick read. That file has the
-real Allegrex numbers at both clocks, split by size and filter, with the
-actual clock and free memory it ran under printed alongside -- state those
-next to the numbers in `BENCHMARKS.md`, the same way `bench/bench.sh` states
-the load average it ran under. A measurement that does not state its
-conditions is a failure mode this project has already been burned by twice.
+real Allegrex numbers at both clocks, split by size and filter (now including
+libpng), with the actual clock and free memory it ran under printed alongside
+-- state those next to the numbers in `BENCHMARKS.md`, the same way
+`bench/bench.sh` states the load average it ran under. A measurement that
+does not state its conditions is a failure mode this project has already
+been burned by twice.
+
+PXL's own numbers at both clocks are already recorded; what a fresh run adds
+is the `png` row next to them, which is the whole point of building it --
+"PXL decodes at N MB/s on a PSP" means little without "and libpng decodes
+the same pixels at M MB/s on the same PSP" beside it.

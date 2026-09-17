@@ -44,7 +44,9 @@ target_compile_definitions(pxl_psp_bench PRIVATE
 # three are the on-screen, pad-reading and clock/power calls main.c adds
 # beyond that; pspge/pspdisplay are pspdebug's own dependencies (it draws
 # through the GU), not something main.c calls directly.
-target_link_libraries(pxl_psp_bench PRIVATE pspdebug pspctrl pspge pspdisplay psppower)
+# png16/z: the libpng baseline main.c decodes against for comparison -- a
+# pspdev portlib, not something this project vendors or builds.
+target_link_libraries(pxl_psp_bench PRIVATE pspdebug pspctrl pspge pspdisplay psppower png16 z)
 
 create_pbp_file(
     TARGET pxl_psp_bench

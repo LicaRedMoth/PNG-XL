@@ -24,20 +24,26 @@
     leaves nothing to that assumption.
 
     Correctness check: three sizes (smoke/screen/texture, see
-    bench/mkpsptest.c) times four filters, each decoded and compared byte-for-
-    byte against pixels re-derived from psp/pattern.h on the spot -- not an
-    embedded reference image, which would have cost several megabytes as hex
-    text for no reason a formula doesn't already cover.
+    bench/mkpsptest.c) times four filters plus libpng, each decoded and
+    compared byte-for-byte against pixels re-derived from psp/pattern.h on the
+    spot -- not an embedded reference image, which would have cost several
+    megabytes as hex text for no reason a formula doesn't already cover.
 
     Throughput sweep: screen (480x272, the PSP's own display resolution) and
     texture (512x512, a common GE texture size) only -- the smoke case is too
     small for a throughput number to mean anything, per-call overhead
     dominates it. Run at both 222 and 333 MHz via scePowerSetClockFrequency,
-    median of several reps per (clock, size, filter) cell. The actual clock in
-    effect and the free memory at the time are printed alongside every result,
-    the same way bench/bench.sh states the load average it ran under: a
-    measurement that does not state its conditions is a failure mode this
-    project has already been burned by twice (see RESEARCH.md).
+    median of several reps per (clock, size, filter-or-libpng) cell. libpng
+    decodes the same pixels via the same normalise-to-RGBA8888 path
+    bench/formatdec.c uses on x86 (png_set_expand/strip_16/gray_to_rgb/
+    add_alpha), so the two numbers mean the same thing: MB/s of finished
+    RGBA8888 output, not MB/s of whatever each format's own native layout
+    happens to be. Without this row there was nothing to compare PXL's PSP
+    numbers against except each other. The actual clock in effect and the
+    free memory at the time are printed alongside every result, the same way
+    bench/bench.sh states the load average it ran under: a measurement that
+    does not state its conditions is a failure mode this project has already
+    been burned by twice (see RESEARCH.md).
 
     On real hardware the program waits for X before exiting -- sceKernelExitGame()
     returns straight to the XMB, and a result nobody had time to read is no
@@ -55,6 +61,9 @@
 #include <pspsysmem.h>
 #include <psprtc.h>
 
+#include <png.h>
+
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +121,8 @@ typedef struct {
     uint32_t              w, h;
     const unsigned char*  files[4];   /* indexed by filter id, see FILTERS[] */
     unsigned int          lens[4];
+    const unsigned char*  png_data;
+    unsigned int          png_len;
 } pxl_psp_size_case;
 
 static const char* const FILTER_NAMES[4] = { "none", "delta", "adaptive", "bcif" };
@@ -121,19 +132,87 @@ static const pxl_psp_size_case SIZES[] = {
       { pxl_psp_smoke_file_none,   pxl_psp_smoke_file_delta,
         pxl_psp_smoke_file_adaptive, pxl_psp_smoke_file_bcif },
       { pxl_psp_smoke_file_none_len,   pxl_psp_smoke_file_delta_len,
-        pxl_psp_smoke_file_adaptive_len, pxl_psp_smoke_file_bcif_len } },
+        pxl_psp_smoke_file_adaptive_len, pxl_psp_smoke_file_bcif_len },
+      pxl_psp_smoke_png, pxl_psp_smoke_png_len },
     { "screen",  480, 272,
       { pxl_psp_screen_file_none,   pxl_psp_screen_file_delta,
         pxl_psp_screen_file_adaptive, pxl_psp_screen_file_bcif },
       { pxl_psp_screen_file_none_len,   pxl_psp_screen_file_delta_len,
-        pxl_psp_screen_file_adaptive_len, pxl_psp_screen_file_bcif_len } },
+        pxl_psp_screen_file_adaptive_len, pxl_psp_screen_file_bcif_len },
+      pxl_psp_screen_png, pxl_psp_screen_png_len },
     { "texture", 512, 512,
       { pxl_psp_texture_file_none,   pxl_psp_texture_file_delta,
         pxl_psp_texture_file_adaptive, pxl_psp_texture_file_bcif },
       { pxl_psp_texture_file_none_len,   pxl_psp_texture_file_delta_len,
-        pxl_psp_texture_file_adaptive_len, pxl_psp_texture_file_bcif_len } },
+        pxl_psp_texture_file_adaptive_len, pxl_psp_texture_file_bcif_len },
+      pxl_psp_texture_png, pxl_psp_texture_png_len },
 };
 #define NUM_SIZES (sizeof SIZES / sizeof SIZES[0])
+
+/* ---- libpng, decoded to the same RGBA8888 every other decoder here uses --
+   identical normalisation chain to bench/formatdec.c's dec_png() on x86, so
+   the two MB/s numbers mean the same thing. ------------------------------ */
+
+typedef struct { const unsigned char* data; size_t size, pos; } mem_reader;
+
+static void png_read_mem(png_structp p, png_bytep out, png_size_t len)
+{
+    mem_reader* r = (mem_reader*)png_get_io_ptr(p);
+    if (r->pos + len > r->size) {
+        png_error(p, "short read");
+    }
+    memcpy(out, r->data + r->pos, len);
+    r->pos += len;
+}
+
+static unsigned char* dec_png_mem(const unsigned char* buf, size_t n,
+                                  uint32_t* w, uint32_t* h, size_t* outn)
+{
+    png_structp p = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    png_infop info = p ? png_create_info_struct(p) : NULL;
+    mem_reader r = { buf, n, 0 };
+    unsigned char* out = NULL;
+    png_bytep* rows = NULL;
+    uint32_t y;
+
+    if (!p || !info) {
+        goto fail;
+    }
+    if (setjmp(png_jmpbuf(p))) {
+        goto fail;
+    }
+    png_set_read_fn(p, &r, png_read_mem);
+    png_read_info(p, info);
+
+    png_set_expand(p);
+    png_set_strip_16(p);
+    png_set_gray_to_rgb(p);
+    png_set_add_alpha(p, 0xFF, PNG_FILLER_AFTER);
+    png_read_update_info(p, info);
+
+    *w = png_get_image_width(p, info);
+    *h = png_get_image_height(p, info);
+    out = (unsigned char*)malloc((size_t)*w * *h * 4);
+    rows = (png_bytep*)malloc((size_t)*h * sizeof(png_bytep));
+    if (!out || !rows) {
+        goto fail;
+    }
+    for (y = 0; y < *h; ++y) {
+        rows[y] = out + (size_t)y * *w * 4;
+    }
+    png_read_image(p, rows);
+    *outn = (size_t)*w * *h * 4;
+    free(rows);
+    png_destroy_read_struct(&p, &info, NULL);
+    return out;
+fail:
+    free(out);
+    free(rows);
+    if (p) {
+        png_destroy_read_struct(&p, info ? &info : NULL, NULL);
+    }
+    return NULL;
+}
 
 /* Regenerates the (w,h) reference image from psp/pattern.h -- the same
    formula bench/mkpsptest.c used to build the embedded .pxl files, so this
@@ -211,6 +290,22 @@ static int run_correctness(void)
                  match ? "MATCH" : "MISMATCH");
             pxl_image_free(&img);
         }
+
+        {
+            uint32_t pw = 0, ph = 0;
+            size_t   pn = 0;
+            unsigned char* pixels = dec_png_mem(SIZES[si].png_data, SIZES[si].png_len,
+                                                &pw, &ph, &pn);
+            int match = pixels && pw == SIZES[si].w && ph == SIZES[si].h &&
+                        pn == expected_len && memcmp(pixels, expected, expected_len) == 0;
+            if (!match) {
+                all_ok = 0;
+            }
+            putf("[%-8s %-8s] %ux%u 4ch %u bytes -- %s\n",
+                 SIZES[si].name, "png", (unsigned)pw, (unsigned)ph,
+                 (unsigned)pn, match ? "MATCH" : "MISMATCH");
+            free(pixels);
+        }
         free(expected);
     }
     put(all_ok ? "correctness: ALL OK\n\n" : "correctness: SOME FAILED\n\n");
@@ -263,6 +358,46 @@ static void run_one_throughput(const pxl_psp_size_case* sc, int filter_idx)
     }
 }
 
+/* Same shape as run_one_throughput(), for the libpng baseline. Kept separate
+   rather than folded into a fifth "filter" because libpng's decode returns
+   its own freshly malloc'd buffer via a different API (dec_png_mem, not
+   pxl_decode/pxl_image_free) -- forcing one shared loop over both would cost
+   more clarity than the three lines of duplication it would save. */
+static void run_one_throughput_png(const pxl_psp_size_case* sc)
+{
+    uint64_t times[REPS];
+    uint64_t med;
+    size_t   bytes = 0;
+    int      i;
+
+    for (i = 0; i < REPS; i++) {
+        uint32_t w, h;
+        size_t   n = 0;
+        unsigned char* pixels;
+        u64 t0, t1;
+        sceRtcGetCurrentTick(&t0);
+        pixels = dec_png_mem(sc->png_data, sc->png_len, &w, &h, &n);
+        sceRtcGetCurrentTick(&t1);
+        times[i] = (uint64_t)(t1 - t0);
+        if (pixels) {
+            bytes = n;
+            free(pixels);
+        }
+    }
+    med = median_u64(times, REPS);
+
+    if (bytes == 0 || med == 0) {
+        putf("  %-8s %-8s DECODE FAILED, skipped\n", sc->name, "png");
+        return;
+    }
+    {
+        double seconds = (double)med / 1000000.0;
+        double mbps = ((double)bytes / (1024.0 * 1024.0)) / seconds;
+        putf("  %-8s %-8s median %6llu us over %d reps, %6u bytes -> %8.3f MB/s\n",
+             sc->name, "png", (unsigned long long)med, REPS, (unsigned)bytes, mbps);
+    }
+}
+
 /* pllfreq/cpufreq/busfreq per scePowerSetClockFrequency's own constraints
    (cpufreq <= pllfreq, busfreq*2 <= pllfreq) -- 222/222/111 and 333/333/166
    are the standard PSP homebrew pairs for "222 MHz" and "333 MHz". */
@@ -286,6 +421,7 @@ static void run_throughput_at(int pllfreq, int cpufreq, int busfreq)
         for (fi = 0; fi < 4; fi++) {
             run_one_throughput(&SIZES[si], (int)fi);
         }
+        run_one_throughput_png(&SIZES[si]);
     }
     put("\n");
 }
