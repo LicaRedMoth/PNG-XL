@@ -16,6 +16,15 @@ comparison the numbers above had nothing against: libpng". PXL beats libpng
 size but **loses to libpng at texture size** — see the "Removing BCIF" entry
 in `ROADMAP.md`'s Held section for what that adds up to.
 
+**Added 2026-09-18, not yet run on real hardware**: `pxl_stream_new_ex`'s
+row-conversion to PSP-native RGB565/RGBA5551 (README's "Decoding straight
+into a GPU's native texture format") — correctness is headless-verified
+against a MIPS-side reference (`-- streaming output-format conversion --`
+below), and a `strm565` throughput row exists in the sweep, but its number
+has not been taken on the console yet. This is exactly the same
+code-verified-timing-pending state the whole throughput sweep was in before
+2026-09-17 — see [Why the headless numbers are not the answer](#why-the-headless-numbers-are-not-the-answer).
+
 ## One-time setup
 
 Needs the [pspdev](https://github.com/pspdev/pspdev) toolchain — not packaged
@@ -99,18 +108,30 @@ PXL PSP decode benchmark, libpxl 1.5.0
 [texture  bcif    ] 512x512 4ch 1048576 bytes -- MATCH
 [texture  png     ] 512x512 4ch 1048576 bytes -- MATCH
 correctness: ALL OK
+-- streaming output-format conversion --
+[smoke    RGB565  ] 64 rows -- MATCH
+[smoke    RGBA5551] 64 rows -- MATCH
+[screen   RGB565  ] 272 rows -- MATCH
+[screen   RGBA5551] 272 rows -- MATCH
+[texture  RGB565  ] 512 rows -- MATCH
+[texture  RGBA5551] 512 rows -- MATCH
+streaming output-format: ALL OK
 -- throughput at 222 MHz requested, 222 MHz actual, 786432 bytes free --
   screen   none     median  16814 us over 15 reps, 522240 bytes ->   29.621 MB/s
   ...
   screen   png      median  82197 us over 15 reps, 522240 bytes ->    6.059 MB/s
+  screen   strm565  median  26463 us over 15 reps, 261120 bytes ->    9.410 MB/s
   ...
 -- throughput at 333 MHz requested, 333 MHz actual, 786432 bytes free --
   screen   none     median  11388 us over 15 reps, 522240 bytes ->   43.734 MB/s
   ...
   screen   png      median  54757 us over 15 reps, 522240 bytes ->    9.096 MB/s
+  screen   strm565  median  17669 us over 15 reps, 261120 bytes ->   14.094 MB/s
   ...
 Saved to results.txt next to this EBOOT. Press X to exit
 ```
+
+`streaming output-format conversion` checks `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/`RGBA5551` conversion row-by-row against a MIPS-side reference computed independently of the decoder's own `convert_row` (same cross-check `tests/roundtrip.c` does on the host) -- this is [ROADMAP.md](../docs/ROADMAP.md)'s "decode straight into a GPU texture" item, verified for correctness here; `strm565` in the throughput sweep is its speed, still emulator-untrustworthy like every other timing on this page, but the number to read once real hardware is available: does converting every row as it streams cost anything over a plain `pxl_decode()`, or does it come for free inside the existing per-row write.
 
 `MATCH` means the MIPS-compiled decoder (PXL's four filters, or libpng for the
 `png` row) reconstructed the exact source pixels for that size — a `memcmp`

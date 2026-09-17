@@ -111,14 +111,26 @@ carrying forward:
   hardware are precise enough to trust for future PSP measurements, not just
   this one.
 
-Two things that would follow naturally now that a real result exists, both
-already half-built:
+Two things that would follow naturally now that a real result exists:
 
-- **Decode straight into a GPU texture.** The row window added for the memory
-  work writes each row into the caller's buffer as it lands, so an output-format
-  parameter (RGBA8888 / 5650 / 5551 / 4444) folds the conversion into that write
-  rather than adding a pass. Swizzled output needs an 8-row window instead of a
-  1-row one, which is a constant, not a redesign.
+- **Done 2026-09-18 — decode straight into a GPU texture.** `pxl_stream_new_ex(cb,
+  user, fmt)` converts each row to `PXL_OUTPUT_RGBA8888`/`RGB565`/`RGBA5551`/
+  `RGBA4444` before the callback sees it, folding the conversion into the
+  existing per-row write rather than adding a pass — exactly the row window
+  the memory work already added, given a format parameter. Only defined for
+  8-bit, non-indexed RGB/RGBA sources; `pxl_stream_image()` still returns the
+  true native pixels regardless, since the per-row predictors need real 8-bit
+  values to stay correct row to row. Verified: `tests/roundtrip.c` checks
+  every converted byte against an independently-written reference for all
+  three packed formats plus RGBA8888, on both a 4-channel and a 3-channel
+  (alpha-defaults-opaque) source, and rejects the geometry that is not
+  defined for it; `psp/main.c` re-runs the same check with a MIPS-side
+  reference and adds a throughput row (`strm565`) so a real hardware run
+  will show whether the streaming+conversion path costs anything over a
+  plain `pxl_decode()` — headless-verified correct, timing pending real
+  hardware. Swizzled output (an 8-row window instead of 1) is not done;
+  nothing needs it without a concrete texture-cache-locality case to measure
+  against, and one-row PXL_OUTPUT_* conversion did not need it either.
 - **Indexed mode maps onto the hardware.** The GE reads 4- and 8-bit palettised
   textures with a CLUT natively, and `.pxl` already stores indices packed with
   the palette in its own section, so an indexed file needs no expansion to RGBA

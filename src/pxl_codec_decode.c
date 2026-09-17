@@ -687,11 +687,95 @@ struct pxl_stream {
     size_t     filtered_cap;
     size_t     filtered_have;
     size_t     meta_have;
+
+    /* Row-conversion scratch space; NULL/0 under PXL_OUTPUT_NATIVE, where the
+       callback reads straight out of img.buffer.data instead. */
+    pxl_output_format out_fmt;
+    uint8_t*   out_row;
+    size_t     out_row_bytes;
     uint32_t   rows_done;
 
     ZSTD_DStream* ds;
     int        frame_done;
 };
+
+/* Converts one already-decoded row of `src_channels` 8-bit samples (3 or 4;
+   a 3-channel source asked for an alpha-carrying format reads as fully
+   opaque) into `fmt`. `out` must hold at least `width` samples of `fmt`'s
+   width (2 bytes for the packed 16-bit formats, 4 for RGBA8888). Never
+   called under PXL_OUTPUT_NATIVE, which bypasses conversion entirely. */
+static void convert_row(pxl_output_format fmt, const uint8_t* src, uint8_t* out,
+                        uint32_t width, unsigned src_channels)
+{
+    uint32_t x;
+    switch (fmt) {
+    case PXL_OUTPUT_RGBA8888:
+        if (src_channels == 4) {
+            memcpy(out, src, (size_t)width * 4);
+            return;
+        }
+        for (x = 0; x < width; ++x) {
+            const uint8_t* p = src + (size_t)x * src_channels;
+            out[x * 4 + 0] = p[0];
+            out[x * 4 + 1] = p[1];
+            out[x * 4 + 2] = p[2];
+            out[x * 4 + 3] = 0xFF;
+        }
+        return;
+    case PXL_OUTPUT_RGB565:
+        for (x = 0; x < width; ++x) {
+            const uint8_t* p = src + (size_t)x * src_channels;
+            unsigned v = ((unsigned)(p[0] >> 3) << 11) |
+                         ((unsigned)(p[1] >> 2) << 5) |
+                         (unsigned)(p[2] >> 3);
+            out[x * 2 + 0] = (uint8_t)v;
+            out[x * 2 + 1] = (uint8_t)(v >> 8);
+        }
+        return;
+    case PXL_OUTPUT_RGBA5551:
+        for (x = 0; x < width; ++x) {
+            const uint8_t* p = src + (size_t)x * src_channels;
+            unsigned a = (src_channels == 4) ? (unsigned)(p[3] >> 7) : 1u;
+            unsigned v = ((unsigned)(p[0] >> 3) << 11) |
+                         ((unsigned)(p[1] >> 3) << 6) |
+                         ((unsigned)(p[2] >> 3) << 1) | a;
+            out[x * 2 + 0] = (uint8_t)v;
+            out[x * 2 + 1] = (uint8_t)(v >> 8);
+        }
+        return;
+    case PXL_OUTPUT_RGBA4444:
+        for (x = 0; x < width; ++x) {
+            const uint8_t* p = src + (size_t)x * src_channels;
+            unsigned a = (src_channels == 4) ? (unsigned)(p[3] >> 4) : 0xFu;
+            unsigned v = ((unsigned)(p[0] >> 4) << 12) |
+                         ((unsigned)(p[1] >> 4) << 8) |
+                         ((unsigned)(p[2] >> 4) << 4) | a;
+            out[x * 2 + 0] = (uint8_t)v;
+            out[x * 2 + 1] = (uint8_t)(v >> 8);
+        }
+        return;
+    case PXL_OUTPUT_NATIVE:
+    default:
+        return; /* unreachable: callers branch on out_fmt before calling */
+    }
+}
+
+/* Routes one decoded row to the caller's callback, converting it first if an
+   output format other than NATIVE was requested. Shared by stream_emit_rows
+   (the row-progressive path) and pxl_stream_finish's BCIF path, which is the
+   only other place a row reaches the callback. */
+static void stream_deliver_row(pxl_stream* s, uint32_t row_index, const uint8_t* row)
+{
+    if (!s->cb) {
+        return;
+    }
+    if (s->out_fmt == PXL_OUTPUT_NATIVE) {
+        s->cb(s->user, row_index, row, s->row_stride);
+        return;
+    }
+    convert_row(s->out_fmt, row, s->out_row, s->h.width, s->h.channels);
+    s->cb(s->user, row_index, s->out_row, s->out_row_bytes);
+}
 
 /* Reconstruct every row whose filtered bytes have arrived. Returns the number
    of newly completed rows, or -1 on malformed data. */
@@ -725,9 +809,7 @@ static int stream_emit_rows(pxl_stream* s)
             return -1;
         }
 
-        if (s->cb) {
-            s->cb(s->user, s->rows_done, cur, s->row_stride);
-        }
+        stream_deliver_row(s, s->rows_done, cur);
         ++s->rows_done;
         ++emitted;
     }
@@ -759,6 +841,11 @@ static int stream_begin(pxl_stream* s)
          (s->h.channels != 3 && s->h.channels != 4))) {
         return 0;
     }
+    if (s->out_fmt != PXL_OUTPUT_NATIVE &&
+        (s->h.bit_depth != 8 || s->h.palette_count != 0 ||
+         (s->h.channels != 3 && s->h.channels != 4))) {
+        return 0;
+    }
 
     pixels_total = s->g.raw_bytes;
     s->row_stride = (size_t)s->g.filter_width * s->pixel_bytes;
@@ -781,6 +868,16 @@ static int stream_begin(pxl_stream* s)
     s->img.channels = s->h.channels;
     s->img.bytes_per_channel = (uint8_t)(s->h.bit_depth == 16 ? 2 : 1);
     s->img.bit_depth = s->h.bit_depth;
+
+    if (s->out_fmt != PXL_OUTPUT_NATIVE) {
+        s->out_row_bytes = (s->out_fmt == PXL_OUTPUT_RGBA8888)
+                               ? (size_t)s->h.width * 4
+                               : (size_t)s->h.width * 2;
+        s->out_row = (uint8_t*)malloc(s->out_row_bytes);
+        if (!s->out_row) {
+            return 0;
+        }
+    }
 
     s->ds = ZSTD_createDStream();
     if (!s->ds) {
@@ -820,7 +917,7 @@ static int stream_begin(pxl_stream* s)
 }
 
 
-pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user)
+pxl_stream* pxl_stream_new_ex(pxl_row_cb cb, void* user, pxl_output_format fmt)
 {
     pxl_stream* s = (pxl_stream*)calloc(1, sizeof(*s));
     if (!s) {
@@ -828,8 +925,14 @@ pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user)
     }
     s->cb = cb;
     s->user = user;
+    s->out_fmt = fmt;
     s->state = PXL_ST_HEADER;
     return s;
+}
+
+pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user)
+{
+    return pxl_stream_new_ex(cb, user, PXL_OUTPUT_NATIVE);
 }
 
 
@@ -1010,11 +1113,8 @@ int pxl_stream_finish(pxl_stream* s)
             unpack_bcif4(s->filtered, s->img.buffer.data, s->h.width, s->h.height);
         }
         s->rows_done = s->h.height;
-        if (s->cb) {
-            for (y = 0; y < s->h.height; ++y) {
-                s->cb(s->user, y, s->img.buffer.data + (size_t)y * s->row_stride,
-                      s->row_stride);
-            }
+        for (y = 0; y < s->h.height; ++y) {
+            stream_deliver_row(s, y, s->img.buffer.data + (size_t)y * s->row_stride);
         }
     }
 
@@ -1031,6 +1131,7 @@ void pxl_stream_free(pxl_stream* s)
         ZSTD_freeDStream(s->ds);
     }
     free(s->filtered);
+    free(s->out_row);
     pxl_image_free(&s->img);
     free(s);
 }

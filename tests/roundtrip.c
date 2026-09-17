@@ -556,6 +556,202 @@ static int check_stream_one(const char* name, uint32_t w, uint32_t h,
     return ok;
 }
 
+/* PXL_OUTPUT_* row conversion: collects every delivered row's bytes in
+   order, for comparison against hand-computed expected packed values --
+   not just "did the stream finish without crashing". */
+typedef struct {
+    unsigned char* out;
+    size_t cap;
+    size_t len;
+    int overflowed;
+} out_collect;
+
+static void collect_row_cb(void* user, uint32_t row_index, const unsigned char* row, size_t row_bytes)
+{
+    out_collect* c = (out_collect*)user;
+    (void)row_index;
+    if (c->len + row_bytes > c->cap) { c->overflowed = 1; return; }
+    memcpy(c->out + c->len, row, row_bytes);
+    c->len += row_bytes;
+}
+
+/* Independent restatement of convert_row's bit layout (not a call into it),
+   so this catches a wiring bug (wrong shift, wrong byte order, wrong channel
+   index) rather than only confirming the implementation agrees with itself. */
+static void expected_565(uint8_t r, uint8_t g, uint8_t b, uint8_t out[2])
+{
+    unsigned v = ((unsigned)(r >> 3) << 11) | ((unsigned)(g >> 2) << 5) | (unsigned)(b >> 3);
+    out[0] = (uint8_t)v; out[1] = (uint8_t)(v >> 8);
+}
+static void expected_5551(uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t out[2])
+{
+    unsigned v = ((unsigned)(r >> 3) << 11) | ((unsigned)(g >> 3) << 6) |
+                 ((unsigned)(b >> 3) << 1) | (unsigned)(a >> 7);
+    out[0] = (uint8_t)v; out[1] = (uint8_t)(v >> 8);
+}
+static void expected_4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t out[2])
+{
+    unsigned v = ((unsigned)(r >> 4) << 12) | ((unsigned)(g >> 4) << 8) |
+                 ((unsigned)(b >> 4) << 4) | (unsigned)(a >> 4);
+    out[0] = (uint8_t)v; out[1] = (uint8_t)(v >> 8);
+}
+
+/* Encodes a 2x2 RGBA image with deliberately chosen pixels (opaque white and
+   black, plus two arbitrary colours that exercise every bit position of the
+   3/2/3 and 4/4/4/4 packings), stream-decodes it under every non-native
+   output format, and checks the delivered bytes against expected_* exactly. */
+static int check_output_format_rgba(void)
+{
+    static const uint8_t px[4][4] = {
+        { 255,255,255,255 }, {   0,  0,  0,  0 },
+        { 128, 64, 32,200 }, {  10, 20, 30,128 }
+    };
+    pxl_image src;
+    pxl_buffer enc;
+    int fi, ok = 1;
+    static const pxl_output_format fmts[] = {
+        PXL_OUTPUT_RGBA8888, PXL_OUTPUT_RGB565, PXL_OUTPUT_RGBA5551, PXL_OUTPUT_RGBA4444
+    };
+
+    memset(&src, 0, sizeof src);
+    src.buffer.size = sizeof px;
+    src.buffer.data = (unsigned char*)malloc(src.buffer.size);
+    if (!src.buffer.data) { printf("[FAIL] output_format: alloc\n"); return 0; }
+    memcpy(src.buffer.data, px, sizeof px);
+    src.width = 2; src.height = 2; src.channels = 4; src.bytes_per_channel = 1;
+
+    enc = pxl_encode(&src, 6);
+    if (!enc.data) { printf("[FAIL] output_format: encode\n"); pxl_image_free(&src); return 0; }
+
+    for (fi = 0; fi < (int)(sizeof fmts / sizeof fmts[0]); fi++) {
+        pxl_output_format fmt = fmts[fi];
+        size_t unit = (fmt == PXL_OUTPUT_RGBA8888) ? 4 : 2;
+        uint8_t want[16]; /* flat, packed at `unit` bytes/pixel -- no per-pixel
+                              padding, matching how the callback's rows are
+                              actually laid out (a [4][4] array here would
+                              silently pad every pixel to 4 bytes and compare
+                              the wrong bytes for the 2-byte formats). */
+        uint8_t got_buf[16];
+        out_collect c;
+        pxl_stream* s;
+        int i, fed;
+
+        for (i = 0; i < 4; i++) {
+            uint8_t r = px[i][0], g = px[i][1], b = px[i][2], a = px[i][3];
+            uint8_t* w = want + (size_t)i * unit;
+            if (fmt == PXL_OUTPUT_RGBA8888) {
+                w[0]=r; w[1]=g; w[2]=b; w[3]=a;
+            } else if (fmt == PXL_OUTPUT_RGB565) {
+                expected_565(r, g, b, w);
+            } else if (fmt == PXL_OUTPUT_RGBA5551) {
+                expected_5551(r, g, b, a, w);
+            } else {
+                expected_4444(r, g, b, a, w);
+            }
+        }
+
+        c.out = got_buf; c.cap = sizeof got_buf; c.len = 0; c.overflowed = 0;
+        s = pxl_stream_new_ex(collect_row_cb, &c, fmt);
+        if (!s) { printf("[FAIL] output_format: stream_new_ex\n"); ok = 0; continue; }
+        fed = pxl_stream_feed(s, enc.data, enc.size);
+        if (fed < 0 || !pxl_stream_finish(s) || c.overflowed ||
+            c.len != (size_t)4 * unit ||
+            memcmp(c.out, want, (size_t)4 * unit) != 0) {
+            printf("[FAIL] output_format: fmt=%d mismatch (fed=%d len=%zu)\n",
+                   (int)fmt, fed, c.len);
+            ok = 0;
+        } else {
+            printf("[ OK ] output_format: fmt=%d, %zu bytes/pixel, bytes match\n",
+                   (int)fmt, unit);
+        }
+        pxl_stream_free(s);
+    }
+
+    pxl_free(&enc);
+    pxl_image_free(&src);
+    return ok;
+}
+
+/* A 3-channel (no alpha) source asked for an alpha-carrying format must read
+   as fully opaque, not garbage or zero. */
+static int check_output_format_rgb_no_alpha(void)
+{
+    static const uint8_t px[2][3] = { { 200, 100, 50 }, { 0, 0, 0 } };
+    pxl_image src;
+    pxl_buffer enc;
+    uint8_t want[2][2];
+    uint8_t got[4];
+    out_collect c;
+    pxl_stream* s;
+    int fed, ok;
+
+    memset(&src, 0, sizeof src);
+    src.buffer.size = sizeof px;
+    src.buffer.data = (unsigned char*)malloc(src.buffer.size);
+    if (!src.buffer.data) { printf("[FAIL] output_format_rgb: alloc\n"); return 0; }
+    memcpy(src.buffer.data, px, sizeof px);
+    src.width = 2; src.height = 1; src.channels = 3; src.bytes_per_channel = 1;
+
+    enc = pxl_encode(&src, 6);
+    if (!enc.data) { printf("[FAIL] output_format_rgb: encode\n"); pxl_image_free(&src); return 0; }
+
+    /* src_channels==3 in convert_row's alpha branch: 1 for 5551 (its alpha is
+       a single bit), 0xF for 4444 -- both mean "fully opaque". */
+    { unsigned v = ((unsigned)(px[0][0]>>3)<<11)|((unsigned)(px[0][1]>>3)<<6)|((unsigned)(px[0][2]>>3)<<1)|1u;
+      want[0][0]=(uint8_t)v; want[0][1]=(uint8_t)(v>>8); }
+    { unsigned v = ((unsigned)(px[1][0]>>3)<<11)|((unsigned)(px[1][1]>>3)<<6)|((unsigned)(px[1][2]>>3)<<1)|1u;
+      want[1][0]=(uint8_t)v; want[1][1]=(uint8_t)(v>>8); }
+
+    c.out = got; c.cap = sizeof got; c.len = 0; c.overflowed = 0;
+    s = pxl_stream_new_ex(collect_row_cb, &c, PXL_OUTPUT_RGBA5551);
+    fed = s ? pxl_stream_feed(s, enc.data, enc.size) : -1;
+    ok = s && fed >= 0 && pxl_stream_finish(s) && !c.overflowed &&
+         c.len == sizeof want && memcmp(c.out, want, sizeof want) == 0;
+    if (ok) {
+        printf("[ OK ] output_format_rgb: 3-channel source, alpha reads opaque under 5551\n");
+    } else {
+        printf("[FAIL] output_format_rgb: 3-channel source alpha handling\n");
+    }
+    if (s) { pxl_stream_free(s); }
+    pxl_free(&enc);
+    pxl_image_free(&src);
+    return ok;
+}
+
+/* Requesting a packed output format on geometry it is not defined for
+   (anything but 8-bit, non-indexed, 3/4-channel) must fail once the header
+   says so, the same way any other geometry mismatch is reported. */
+static int check_output_format_rejects_bad_geometry(void)
+{
+    pxl_image src;
+    pxl_buffer enc;
+    pxl_stream* s;
+    int fed, ok;
+    uint8_t px[4] = { 10, 20, 30, 40 }; /* 2x2 8-bit GRAY, 1 channel */
+
+    memset(&src, 0, sizeof src);
+    src.buffer.size = sizeof px;
+    src.buffer.data = (unsigned char*)malloc(src.buffer.size);
+    memcpy(src.buffer.data, px, sizeof px);
+    src.width = 2; src.height = 2; src.channels = 1; src.bytes_per_channel = 1;
+
+    enc = pxl_encode(&src, 6);
+    if (!enc.data) { printf("[FAIL] output_format_reject: encode\n"); pxl_image_free(&src); return 0; }
+
+    s = pxl_stream_new_ex(NULL, NULL, PXL_OUTPUT_RGB565);
+    fed = s ? pxl_stream_feed(s, enc.data, enc.size) : -1;
+    ok = (fed == -1);
+    if (ok) {
+        printf("[ OK ] output_format_reject: 1-channel source + RGB565 correctly rejected\n");
+    } else {
+        printf("[FAIL] output_format_reject: should have failed, fed=%d\n", fed);
+    }
+    if (s) { pxl_stream_free(s); }
+    pxl_free(&enc);
+    pxl_image_free(&src);
+    return ok;
+}
+
 /* Truncated and corrupt inputs must be rejected, not silently accepted. */
 static int check_stream_errors(void)
 {
@@ -1132,6 +1328,9 @@ int main(int argc, char** argv)
     failures += !check_stream_one("rgb8_any",    128, 96, 3, 1, 0, 0xFF, 0, 0xFF);
     failures += !check_stream_one("rgba8_any",   128, 96, 4, 1, 0, 0xFF, 0, 0xFF);
     failures += !check_stream_one("one_px",        1,  1, 4, 1, 0, 0xFF, 0, 0xFF);
+    failures += !check_output_format_rgba();
+    failures += !check_output_format_rgb_no_alpha();
+    failures += !check_output_format_rejects_bad_geometry();
     failures += !check_stream_errors();
     failures += !check_bad_filter_geometry();
 

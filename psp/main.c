@@ -312,6 +312,113 @@ static int run_correctness(void)
     return all_ok;
 }
 
+/* Independent restatement of pxl_stream_new_ex's RGB565/RGBA5551 packing
+   (not a call into libpxlcore's own convert_row), matching
+   tests/roundtrip.c's own cross-check on the host: this catches a wiring bug
+   (wrong shift, wrong byte order, wrong channel index) on the real target
+   rather than only confirming the MIPS build agrees with itself. */
+static void expected_565(const uint8_t* rgba, uint8_t out[2])
+{
+    unsigned v = ((unsigned)(rgba[0] >> 3) << 11) |
+                 ((unsigned)(rgba[1] >> 2) << 5) |
+                 (unsigned)(rgba[2] >> 3);
+    out[0] = (uint8_t)v; out[1] = (uint8_t)(v >> 8);
+}
+static void expected_5551(const uint8_t* rgba, uint8_t out[2])
+{
+    unsigned v = ((unsigned)(rgba[0] >> 3) << 11) |
+                 ((unsigned)(rgba[1] >> 3) << 6) |
+                 ((unsigned)(rgba[2] >> 3) << 1) |
+                 (unsigned)(rgba[3] >> 7);
+    out[0] = (uint8_t)v; out[1] = (uint8_t)(v >> 8);
+}
+
+typedef struct {
+    const uint8_t* expected_rgba;
+    uint32_t       width;
+    pxl_output_format fmt;
+    uint32_t       rows_seen;
+    int            mismatch;
+} out_fmt_ctx;
+
+static void out_fmt_row_cb(void* user, uint32_t row_index,
+                           const unsigned char* row, size_t row_bytes)
+{
+    out_fmt_ctx* c = (out_fmt_ctx*)user;
+    uint32_t x;
+    (void)row_bytes;
+    for (x = 0; x < c->width; x++) {
+        const uint8_t* px = c->expected_rgba + ((size_t)row_index * c->width + x) * 4;
+        uint8_t want[2];
+        if (c->fmt == PXL_OUTPUT_RGB565) {
+            expected_565(px, want);
+        } else {
+            expected_5551(px, want);
+        }
+        if (row[x * 2] != want[0] || row[x * 2 + 1] != want[1]) {
+            c->mismatch = 1;
+        }
+    }
+    c->rows_seen += 1;
+}
+
+/* Streams the "none"-filter file of each size through pxl_stream_new_ex,
+   once per PSP-native packed format, checking every converted pixel against
+   expected_565/expected_5551 above -- this is what ROADMAP.md's "decode
+   straight into a GPU texture" item asked for: rows arrive already in the
+   layout the GE reads natively, with no separate conversion pass. Runs after
+   run_correctness() and does not depend on it, since it decodes independently
+   via the streaming API rather than pxl_decode(). */
+static int run_output_format_correctness(void)
+{
+    static const struct { const char* name; pxl_output_format fmt; } fmts[] = {
+        { "RGB565",   PXL_OUTPUT_RGB565 },
+        { "RGBA5551", PXL_OUTPUT_RGBA5551 },
+    };
+    size_t si, fj;
+    int all_ok = 1;
+
+    put("-- streaming output-format conversion --\n");
+    for (si = 0; si < NUM_SIZES; si++) {
+        uint8_t* expected = make_expected(SIZES[si].w, SIZES[si].h);
+        if (!expected) {
+            putf("[%-8s streamfmt] out of memory building reference\n", SIZES[si].name);
+            all_ok = 0;
+            continue;
+        }
+        for (fj = 0; fj < sizeof fmts / sizeof fmts[0]; fj++) {
+            out_fmt_ctx ctx;
+            pxl_stream* s;
+            pxl_buffer  file;
+            int fed, ok;
+
+            ctx.expected_rgba = expected;
+            ctx.width = SIZES[si].w;
+            ctx.fmt = fmts[fj].fmt;
+            ctx.rows_seen = 0;
+            ctx.mismatch = 0;
+
+            s = pxl_stream_new_ex(out_fmt_row_cb, &ctx, fmts[fj].fmt);
+            file.data = (unsigned char*)SIZES[si].files[0]; /* "none" filter */
+            file.size = SIZES[si].lens[0];
+            fed = s ? pxl_stream_feed(s, file.data, file.size) : -1;
+            ok = s && fed >= 0 && pxl_stream_finish(s) &&
+                 ctx.rows_seen == SIZES[si].h && !ctx.mismatch;
+            if (!ok) {
+                all_ok = 0;
+            }
+            putf("[%-8s %-8s] %u rows -- %s\n", SIZES[si].name, fmts[fj].name,
+                 (unsigned)ctx.rows_seen, ok ? "MATCH" : "MISMATCH");
+            if (s) {
+                pxl_stream_free(s);
+            }
+        }
+        free(expected);
+    }
+    put(all_ok ? "streaming output-format: ALL OK\n\n" : "streaming output-format: SOME FAILED\n\n");
+    return all_ok;
+}
+
 /* Median decode time over REPS repetitions of one (size, filter) case, and
    the resulting throughput in MB/s of decoded (output) bytes. Correctness was
    already checked in run_correctness(), so this only times. */
@@ -398,6 +505,60 @@ static void run_one_throughput_png(const pxl_psp_size_case* sc)
     }
 }
 
+static void noop_row_cb(void* user, uint32_t row_index,
+                        const unsigned char* row, size_t row_bytes)
+{
+    (void)user; (void)row_index; (void)row; (void)row_bytes;
+}
+
+/* Times the full pxl_stream_new_ex -> feed -> finish -> free cycle against
+   the "none" filter file, converting every row to RGB565 as it streams --
+   the number this project actually needs from real hardware to answer
+   "does decoding straight into a GE-native format cost anything over a
+   plain pxl_decode()", which run_one_throughput() alone cannot show. The
+   callback does nothing (correctness is already checked separately, in
+   run_output_format_correctness()); this isolates the streaming+conversion
+   cost, not a caller's own row handling on top of it. */
+static void run_one_throughput_streamfmt(const pxl_psp_size_case* sc)
+{
+    uint64_t times[REPS];
+    uint64_t med;
+    size_t   bytes = (size_t)sc->w * sc->h * 2; /* RGB565: 2 bytes/pixel */
+    int      i;
+
+    for (i = 0; i < REPS; i++) {
+        pxl_stream* s;
+        pxl_buffer  file;
+        u64 t0, t1;
+
+        file.data = (unsigned char*)sc->files[0]; /* "none" filter */
+        file.size = sc->lens[0];
+        s = pxl_stream_new_ex(noop_row_cb, NULL, PXL_OUTPUT_RGB565);
+        sceRtcGetCurrentTick(&t0);
+        if (s) {
+            pxl_stream_feed(s, file.data, file.size);
+            pxl_stream_finish(s);
+        }
+        sceRtcGetCurrentTick(&t1);
+        times[i] = (uint64_t)(t1 - t0);
+        if (s) {
+            pxl_stream_free(s);
+        }
+    }
+    med = median_u64(times, REPS);
+
+    if (med == 0) {
+        putf("  %-8s %-8s DECODE FAILED, skipped\n", sc->name, "strm565");
+        return;
+    }
+    {
+        double seconds = (double)med / 1000000.0;
+        double mbps = ((double)bytes / (1024.0 * 1024.0)) / seconds;
+        putf("  %-8s %-8s median %6llu us over %d reps, %6u bytes -> %8.3f MB/s\n",
+             sc->name, "strm565", (unsigned long long)med, REPS, (unsigned)bytes, mbps);
+    }
+}
+
 /* pllfreq/cpufreq/busfreq per scePowerSetClockFrequency's own constraints
    (cpufreq <= pllfreq, busfreq*2 <= pllfreq) -- 222/222/111 and 333/333/166
    are the standard PSP homebrew pairs for "222 MHz" and "333 MHz". */
@@ -422,6 +583,7 @@ static void run_throughput_at(int pllfreq, int cpufreq, int busfreq)
             run_one_throughput(&SIZES[si], (int)fi);
         }
         run_one_throughput_png(&SIZES[si]);
+        run_one_throughput_streamfmt(&SIZES[si]);
     }
     put("\n");
 }
@@ -434,6 +596,7 @@ int main(void)
     putf("PXL PSP decode benchmark, libpxl %s\n\n", pxl_version());
 
     all_ok = run_correctness();
+    all_ok = run_output_format_correctness() && all_ok;
 
     /* Only meaningful if the pixels were actually right -- a fast wrong
        answer is not a result. */

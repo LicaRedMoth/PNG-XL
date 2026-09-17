@@ -475,6 +475,33 @@ ones, where memory is not a problem anyway).
 Since `libpxlcore` is PNG-free, this decoder is what a future WASM build would
 expose to the browser.
 
+### Decoding straight into a GPU's native texture format
+
+`pxl_stream_new_ex` converts every row to a packed format before `on_row`
+sees it, instead of handing back the source's own 8-bit-per-channel layout:
+
+```c
+pxl_stream* s = pxl_stream_new_ex(on_row, ctx, PXL_OUTPUT_RGB565);
+```
+
+`PXL_OUTPUT_RGBA8888` / `RGB565` / `RGBA5551` / `RGBA4444` are the formats a
+PSP's GE reads natively — none of which an 8-bit RGB(A) `.pxl` file decodes
+to on its own, so without this every caller was writing and maintaining that
+conversion pass itself. It folds into the existing per-row write rather than
+adding one, only applies to 8-bit, non-indexed RGB/RGBA sources (a 3-channel
+source asked for an alpha-carrying format reads as fully opaque), and never
+touches the file: `pxl_stream_image()` still returns the true decoded pixels
+regardless of `fmt`, since ADAPTIVE's per-row predictors need the real 8-bit
+values from row to row to stay correct. `pxl_stream_new(cb, user)` is exactly
+`pxl_stream_new_ex(cb, user, PXL_OUTPUT_NATIVE)`.
+
+Verified against an independently-computed reference for every format on
+both a 4-channel and a 3-channel source (`tests/roundtrip.c`), and again on
+real MIPS hardware output under `PPSSPPHeadless` (`psp/main.c`) — what is not
+yet verified is whether the conversion costs anything over a plain
+`pxl_decode()` on the actual console; `psp/main.c`'s `strm565` throughput row
+exists to answer that once real hardware is available.
+
 ## Library API
 
 ```c
@@ -490,6 +517,7 @@ void       pxl_image_free(pxl_image* img);   /* frees pixels + metadata */
 
 /* streaming decode -- see "Progressive decoding" above */
 pxl_stream*      pxl_stream_new(pxl_row_cb cb, void* user);
+pxl_stream*      pxl_stream_new_ex(pxl_row_cb cb, void* user, pxl_output_format fmt);
 int              pxl_stream_feed(pxl_stream* s, const void* data, size_t len);
 const pxl_image* pxl_stream_image(const pxl_stream* s, uint32_t* rows_ready);
 int              pxl_stream_finish(pxl_stream* s);

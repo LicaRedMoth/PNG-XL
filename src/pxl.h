@@ -145,18 +145,53 @@ pxl_image pxl_image_expand(const pxl_image* img);
   Streaming (progressive) decode: emit rows top-to-bottom as bytes arrive
 ----------------------------------------------------------------------------*/
 
-/* Called for each fully decoded row, in order from the top. `row` points into
-   the decoder's internal image buffer and stays valid until pxl_stream_free.
-   Rows are delivered progressively for DELTA/ADAPTIVE files; for BCIF files all
-   rows arrive at pxl_stream_finish (the plane layout is not row-progressive). */
+/* Called for each fully decoded row, in order from the top. Under
+   PXL_OUTPUT_NATIVE (the default), `row` points into the decoder's internal
+   image buffer and stays valid until pxl_stream_free; under any other output
+   format, `row` points at a per-stream scratch buffer holding that row
+   already converted, valid only until the next call. Rows are delivered
+   progressively for DELTA/ADAPTIVE files; for BCIF files all rows arrive at
+   pxl_stream_finish (the plane layout is not row-progressive). */
 typedef void (*pxl_row_cb)(void* user, uint32_t row_index,
                            const unsigned char* row, size_t row_bytes);
+
+/* Row format for the streaming callback. NATIVE hands back whatever the
+   source image's own channels/bit_depth already are -- no conversion, no
+   extra buffer, the long-standing default. The others convert each row to a
+   fixed packed layout before the callback sees it: useful for handing rows
+   straight to a GPU that reads its own native texture format (the PSP GE
+   reads 5650/5551/4444/8888, none of which is what an 8-bit RGB(A) file
+   decodes to) without every caller writing and maintaining that conversion
+   itself. This never touches the file: the bytes on disk are exactly as
+   lossless as they always were, and pxl_stream_image() still returns the
+   true decoded (native) pixels regardless of what the row callback sees --
+   only the callback's copy is converted, because the decoder's internal
+   per-row predictors (ADAPTIVE's Paeth etc.) need the real 8-bit values to
+   stay correct from row to row.
+
+   Only defined for 8-bit, non-indexed RGB (3 channel) or RGBA (4 channel)
+   source images -- pxl_stream_new_ex still returns a valid stream for
+   anything else, but pxl_stream_feed fails once the header says otherwise,
+   the same way any other geometry mismatch is reported. A 3-channel source
+   asked for an alpha-carrying format is filled fully opaque. */
+typedef enum {
+    PXL_OUTPUT_NATIVE = 0,
+    PXL_OUTPUT_RGBA8888,
+    PXL_OUTPUT_RGB565,
+    PXL_OUTPUT_RGBA5551,
+    PXL_OUTPUT_RGBA4444
+} pxl_output_format;
 
 typedef struct pxl_stream pxl_stream;
 
 /* Create a streaming decoder. cb may be NULL (rows still accumulate in the
    buffer exposed by pxl_stream_image). Returns NULL on allocation failure. */
 pxl_stream* pxl_stream_new(pxl_row_cb cb, void* user);
+
+/* As pxl_stream_new, with row_cb's output converted to `fmt` (see
+   pxl_output_format). pxl_stream_new(cb, user) is exactly
+   pxl_stream_new_ex(cb, user, PXL_OUTPUT_NATIVE). */
+pxl_stream* pxl_stream_new_ex(pxl_row_cb cb, void* user, pxl_output_format fmt);
 
 /* Feed the next chunk of .pxl bytes (any size, even one byte at a time).
    Returns the number of newly completed rows (>= 0), or -1 on a format error. */
