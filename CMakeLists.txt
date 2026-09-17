@@ -314,6 +314,17 @@ add_executable(pxl_bench_motion bench/motion.c)
 target_link_libraries(pxl_bench_motion PRIVATE pxl)
 target_include_directories(pxl_bench_motion PRIVATE src)
 
+# Whether zstd long-distance matching actually helps APXL's cross-frame
+# stream, per shot, with the compression level held fixed so LDM is the only
+# variable -- see bench/ldmsweep.c for why apxl_encode() itself can't answer
+# this (LDM is tied to level, not exposed as its own knob).
+add_executable(pxl_bench_ldmsweep bench/ldmsweep.c)
+target_link_libraries(pxl_bench_ldmsweep PRIVATE pxl)
+target_include_directories(pxl_bench_ldmsweep PRIVATE src)
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_ldmsweep PRIVATE ${PXL_ZSTD_INCLUDE})
+endif()
+
 # Which per-row filters the adaptive filter actually picks, over a corpus.
 # Includes pxl_codec_encode.c directly for the same reason pxl_bench_stages does:
 # the row-filter helpers are static.
