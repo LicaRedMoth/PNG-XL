@@ -206,6 +206,24 @@ if(PXL_VENDORED)
     target_include_directories(pxl_bench_adaptivecost PRIVATE ${PXL_PNG_INCLUDE})
 endif()
 
+# Whether storing pixels pre-packed into a native PSP/GE format (RGB565,
+# RGBA5551) compresses smaller and/or decodes faster than 8-bit-per-channel --
+# see bench/packedformat.c for why this repeats-with-a-different-layout the
+# already-rejected packed-10-bit experiment rather than reusing its answer.
+add_executable(pxl_bench_packedformat bench/packedformat.c
+                                      src/pxl_codec_common.c
+                                      src/pxl_png.c
+                                      src/pxl_pngio.c
+                                      src/pxl_meta.c
+                                      src/pxl_io.c)
+target_include_directories(pxl_bench_packedformat PRIVATE src)
+target_link_libraries(pxl_bench_packedformat PRIVATE
+                      ${PXL_ZSTD_TARGET} ${PXL_PNG_TARGET} ${PXL_ZLIB_TARGET})
+if(PXL_VENDORED)
+    target_include_directories(pxl_bench_packedformat PRIVATE ${PXL_ZSTD_INCLUDE})
+    target_include_directories(pxl_bench_packedformat PRIVATE ${PXL_PNG_INCLUDE})
+endif()
+
 # Generates psp/testdata.h: one valid .pxl file per (size, color filter) pair,
 # forced (not chosen by the encoder) so the PSP program can exercise all four,
 # plus one PNG per size (libpng's own default settings) as the baseline the

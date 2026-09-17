@@ -1022,3 +1022,73 @@ a file-supplied length by *subtracting from the known size*, never by adding to
 an offset. On this project's 32-bit target that is a correctness rule, not a
 style preference. `tests/fuzz_meta.c` was added because the metadata paths, where
 bug 1 lived, had no fuzz coverage at all.
+
+---
+
+### Packed 16-bit native formats (RGB565, RGBA5551) — measured, not decided
+**Raised 2026-09-17**, prompted by the ChatGPT-suggested full-pipeline
+benchmark and the question of whether PXL could ingest PSP-native pixel
+formats directly. First instinct was "already answered" — this project
+already rejected packed sub-16-bit samples once (packed 10-bit, four samples
+per five bytes: 37.5% less raw data compressed to 23% *more*, above). That
+instinct was checked with `bench/packedformat.c` rather than trusted, and it
+was wrong.
+
+**Why the two cases differ.** The 10-bit rejection's mechanism was that
+sample boundaries wander: 4 samples pack into 5 bytes, so a byte's role
+(which sample, which bits of it) cycles with a 4-sample period, and a
+byte-oriented matcher sees the same value produce different byte patterns
+depending on its position. RGB565/5551 do not have this problem — every
+pixel is *exactly* 2 bytes, always in the same bit layout, so byte 0 of pixel
+N and byte 0 of pixel N-1 are always the same bit-field (e.g. always "R's top
+5 bits + G's top 3 bits"). There is no wandering to defeat the matcher.
+
+**Result, Kodak (24 photographs), 8-bit RGB truncated to 565:**
+
+| | raw bytes | compressed |
+|---|---:|---:|
+| 8-bit (existing) | 100% | 100% |
+| packed 565 | **66.7%** | **55.5%** |
+
+Compressed size is smaller than the raw-byte ratio alone would predict —
+565's precision loss removes some of the noise floor 8-bit had to spend bits
+encoding, not just half the container. On 15 Synthetic-Screenshots files
+(RGB565/RGBA5551 depending on source channels) the effect is smaller and
+sometimes reverses slightly (compressed 64.3% against raw 53.7%) — flat UI
+regions and sharp edges don't have a noise floor to truncate, so quantizing
+them trades exact colour reproduction for a ratio close to, but not always
+better than, proportional.
+
+**The caveat that matters more than either number.** Both measurements above
+*discard real bits* — they truncate genuine 8-bit source photographs and
+screenshots to fewer bits per channel, which is lossy, full stop. That is not
+something to build into a codec whose whole identity is "lossless at every
+bit depth" as a way to shrink existing 8-bit assets. The measurement is
+honest about what it tested (compressibility and raw-byte volume of 565 data,
+regardless of where it came from) but the numbers above are not evidence for
+"convert your photos to save space."
+
+**Where this could be legitimate:** content that is *already* 565/5551/4444
+before it ever reaches PXL — which describes a lot of real PSP game texture
+authoring, where assets are exported at reduced precision on purpose to save
+console memory and bandwidth. Storing *that* content packed, losslessly (no
+bits are discarded that the source did not already lack), would get the
+measured size and raw-byte benefits for free, and — since this project's own
+numbers show zstd is 88-98% of decode time for every filter but adaptive —
+the raw-byte reduction should translate into a real, roughly proportional
+decode-speed gain on top, not just smaller files. It would also let the PSP
+skip the RGBA8888-to-565 conversion pass entirely for such textures, since
+the decoded bytes would already be in the exact layout the GE wants.
+
+**Status: not decided.** This needs a real format decision, not a flag:
+`.pxl`'s container currently describes geometry as channels (1-4) x depth
+(1/2/4/8/16), which has no slot for "3 or 4 channels packed at 5-6-5 or
+5-5-5-1 bits" — adding one means a SPEC.md change, a decoder change to
+recognise it (trivial: it is still a fixed-width sample, unfilter does not
+care what the bits mean), and a decision about whether a codec that has
+never been lossy anywhere gains its first lossy-adjacent input path (lossless
+*of the packed source*, but a tool built to load an 8-bit PNG and hand it to
+`pxltool` would need to already have quantized before encoding, which is a
+new failure mode to explain in the spec, not in the encoder). Left open
+rather than accepted or rejected; revisit with an actual corpus of
+natively-565 PSP game textures, which this project does not have yet.

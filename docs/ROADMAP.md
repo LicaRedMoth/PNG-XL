@@ -129,6 +129,39 @@ until the last byte, so it cannot stream into a texture. That was already the
 third independent argument against it, and the hardware-throughput result
 above added a fourth — see the "Removing BCIF" entry in Held, below.
 
+### Measure the full load pipeline, not just decode
+
+Raised 2026-09-17: decode MB/s is not the same claim as "time to a drawable
+texture." Memory Stick I/O, any RGBA8888-to-native-format conversion, and the
+VRAM upload all sit between `pxl_decode` returning and `sceGuDrawArray`
+actually being able to use the result, and none of them are in the numbers
+measured so far. What's known without a new measurement: I/O should favour
+PXL further (its files are already smaller than PNG's, so there is less to
+read off a slow Memory Stick), and the VRAM-copy step is a shared, roughly
+equal cost for both formats that dilutes the *relative* percentage gain
+without reversing which one is faster. The conversion step is the one that
+could go either way today — neither PXL nor libpng outputs a native GE format
+directly — but PXL is positioned to close it first via the GPU-texture item
+above, which libpng has no equivalent path for.
+
+What to build: a real `Memory Stick -> file -> decode -> usable texture ->
+sceGuDrawArray` timer, against the same for libpng, on the PSP. The code and
+correctness can be built and verified under `PPSSPPHeadless` now the same way
+`psp/main.c` already is; the timing itself needs real hardware, which is not
+available while the console is elsewhere. See `psp/README.md`'s pattern for
+how to keep those two states honestly separate when this is picked up.
+
+### Packed native pixel formats (RGB565 / RGBA5551) for PSP textures
+
+Raised and measured 2026-09-17, not decided — see the RESEARCH.md entry of
+the same name. Storing pixels already at PSP-native precision (not
+lossily converted from 8-bit) compresses smaller and halves the raw bytes
+zstd has to move, which this project's own numbers suggest should speed up
+decode too. Needs a real container-format decision (a geometry PXL's header
+cannot currently describe) and a corpus of natively-565 PSP textures this
+project does not have yet, so it stays a recorded, evidenced option rather
+than a plan.
+
 
 ### Corpus gaps, now that the capture folders are known
 
