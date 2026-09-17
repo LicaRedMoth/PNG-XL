@@ -384,7 +384,7 @@ the layout without a new magic; until then decoders MUST reject other values.
 
 ---
 
-## 10. Animated PXL (`.apxl`), version 1
+## 10. Animated PXL (`.apxl`), version 2
 
 `.apxl` stores a lossless animation as a canvas plus N full-canvas frames. All
 frames' pixels are concatenated in order and compressed as **one** zstd frame
@@ -396,16 +396,19 @@ per-frame streams, temporal deltas, and per-frame spatial filtering all
 compress *worse* than a single cross-frame stream, because they destroy the
 byte-level matches between successive frames.
 
-Only `Version == 1` is defined for `.apxl`; decoders MUST reject any other
-value.
+Only `Version == 2` is defined for `.apxl`; decoders MUST reject any other
+value. (Version 1 lacked the palette fields below; it predates indexed-still
+support in the sibling `.pxl` format by two days and was never released
+outside this project, so version 2 is a clean bump, not a compatibility
+shim — see `docs/RESEARCH.md`'s "Indexed `.apxl`" entry.)
 
-### 10.1 File header (32 bytes, little-endian)
+### 10.1 File header (36 bytes, little-endian)
 
 | Offset | Size | Field | Notes |
 |-------:|-----:|-------|-------|
 | 0  | 4 | `Magic` | ASCII `"APXL"` = `0x41 0x50 0x58 0x4C` |
-| 4  | 1 | `Version` | `1` |
-| 5  | 1 | `Channels` | 1..4 (canonically 4 = RGBA) |
+| 4  | 1 | `Version` | `2` |
+| 5  | 1 | `Channels` | 1..4 (canonically 4 = RGBA; 1 with `PaletteCount` > 0 means indexed) |
 | 6  | 1 | `BytesPerChannel` | 1 or 2 |
 | 7  | 1 | `Flags` | reserved, 0 |
 | 8  | 4 | `CanvasWidth` | uint32 LE |
@@ -414,18 +417,35 @@ value.
 | 20 | 4 | `LoopCount` | uint32 LE, 0 = infinite |
 | 24 | 4 | `MetaByteCount` | uint32 LE |
 | 28 | 4 | `RawByteCount` | uint32 LE = `FrameCount × canvas_bytes` |
+| 32 | 2 | `PaletteCount` | uint16 LE, 0..256; 0 = not indexed |
+| 34 | 2 | `PaletteAlphaCount` | uint16 LE, 0..`PaletteCount` |
 
 `canvas_bytes = CanvasWidth × CanvasHeight × Channels × BytesPerChannel`.
 
-APXL version `1` carries no palette and no sub-byte depths: every frame is
-byte-aligned with 8 or 16 bits per sample. An indexed still image is expanded to
-`RGB`/`RGBA` before it enters an animation, so `canvas_bytes` above stays exact.
-Indexed animation is left to a future version.
+APXL carries no sub-byte depths: every frame is byte-aligned with 8 or 16 bits
+per sample. An indexed still image with a sub-8-bit depth must be expanded to
+8-bit indices before it enters an animation, so `canvas_bytes` above stays
+exact; a non-indexed source still expands to `RGB`/`RGBA` as before.
+
+**Indexed animation** (`PaletteCount` > 0): one global palette for the *whole*
+stream, matching APNG's single `PLTE` — not a palette per frame. `Channels`
+MUST be `1` and `BytesPerChannel` MUST be `1`; each frame's pixels are then
+index bytes into the palette below, and `canvas_bytes` is exactly the pixel
+count (no special case). A source animation whose frames would need different
+palettes, or more than 256 colours in their union, cannot be represented this
+way and MUST be expanded to `RGB`/`RGBA` instead — see
+`docs/RESEARCH.md`'s "Indexed `.apxl`" entry for how often that holds on real
+content (76% of a sampled corpus; 100% of the UI/game-icon-shaped content
+specifically).
 
 ### 10.2 Body
 
 ```
-+------------------------+ offset 32
++------------------------+ offset 36
+|  palette RGB           |  PaletteCount * 3 bytes (empty unless indexed)
++------------------------+
+|  palette alpha         |  PaletteAlphaCount bytes (empty unless present)
++------------------------+
 |  metadata block        |  MetaByteCount bytes (may be 0; §3 convention)
 +------------------------+
 |  FrameTiming[N]        |  N × 4 bytes: DelayNum(2 LE) + DelayDen(2 LE)
@@ -435,7 +455,8 @@ Indexed animation is left to a future version.
 ```
 
 The zstd frame decompresses to `FrameCount` full-canvas frames laid out
-back-to-back, each `canvas_bytes` long, in the pixel model of section 4.
+back-to-back, each `canvas_bytes` long, in the pixel model of section 4 (or,
+for an indexed stream, raw index bytes referencing the one palette above).
 `DelayDen == 0` is treated as 100 (per APNG timing).
 
 ### 10.3 Playback / decode
@@ -448,4 +469,7 @@ decoder allows `windowLog` up to 28. Frame `i` is the slice `[i × canvas_bytes,
 frame is already a full canvas and is bit-exact.
 
 APNG interop (loading an APNG into frames, or writing frames back as APNG) is a
-front-end concern and is not part of this container definition.
+front-end concern and is not part of this container definition. As of this
+version, no front end in this project actually keeps an indexed source
+unexpanded on the way in — `apxl_encode`/`apxl_decode` support the container
+shape, but building an animation that uses it is left to a caller.

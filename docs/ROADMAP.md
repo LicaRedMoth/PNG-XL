@@ -48,6 +48,125 @@ freezing is a decision to freeze — the format is pre-release with no outside
 users, so the spec can still change without a version bump, and that window
 closes at release.
 
+### Verify: is `.apxl`/APNG actually finished?
+
+Raised 2026-09-18, not assumed — checked against `SPEC.md`, `RESEARCH.md` and
+the test tree rather than taken on faith, because it had not been re-checked
+since the container shipped. Three things are still open:
+
+1. **The LDM-per-stream decision is not made.** See "Decide cross-frame
+   long-distance matching per stream" below — 16-frame evidence from two Anita
+   shots only, no corpus sweep yet, no threshold. This is the one item that
+   blocks calling the *encoder's* animation behaviour settled, as opposed to
+   the container format.
+2. **Done — indexed animation: decided.** Was out of `.apxl` version 1 by
+   ordering accident, not a considered rejection (`SPEC.md` §10.1; the v1/v2
+   header froze 2026-07-25/26, two days before indexed-still support existed
+   at all, `314bb18`, 2026-07-27). Measured 2026-09-18 against a purpose-built
+   corpus (`bench/gif_corpus.sh`, 66 freely-licensed animated GIFs from
+   Wikimedia Commons): the design precondition — one global ≤256-colour
+   palette per stream — holds on 100% of the PSP-relevant content sampled
+   (Animated pixel art, Throbbers) and 76% overall; where it holds, indexed
+   compresses ~33% smaller than RGBA at `.apxl`'s real settings, in 49 of 50
+   files. See `RESEARCH.md`'s "Indexed `.apxl`" entry for the full numbers.
+   **Decision: build it.** Not yet started — see "Implement indexed `.apxl`"
+   below for the actual work this opens.
+3. **Anita is the only animation corpus exercised.** `Screenrecords` (H.264,
+   personal, gitignored) exists locally as a second one and is not wired into
+   any bench script yet — see "Corpus gaps" below.
+
+What is solid, so this is not a rewrite: `tests/roundtrip.c` exercises
+`apxl_decode`/`apng_load`/`apng_save` round-trips, and the 2026-09-16 security
+audit ran 3M decode-fuzz and 700k metadata-fuzz iterations under 32-bit
+ASAN/UBSAN against these same paths, catching and fixing two real bugs
+(`c812767`) — correctness and hardening are covered. What is not settled is
+whether the *encoder's* LDM-always-on-at-level-≥10 default is the behaviour
+this project wants to freeze on (item 1), and indexed animation now has a
+decision but no implementation yet (item 2, see "Implement indexed `.apxl`"
+below) — freezing the container format ahead of that would freeze it without
+the feature this measurement just justified.
+
+### Implement indexed `.apxl`
+
+Decided 2026-09-18 (see item 2 above and `RESEARCH.md`'s "Indexed `.apxl`"
+entry). Container, codec, auto-palette builder, CLI and the whole APNG
+round trip are done the same day; only the PSP/GE path is not.
+
+**Done:**
+
+- **Header:** `.apxl` bumped to version 2, 32 → 36 bytes
+  (`src/apxl_format.h`), carrying `PaletteCount`/`PaletteAlphaCount` the way
+  the still `.pxl` header already does ([[indexed-mode]] design note,
+  `314bb18`). Turned out simpler than expected: `.apxl` has no per-frame
+  filter stage at all (unlike stills), so there was no `pixel_bytes`/
+  `filter_width` trick to reuse — indexed frames are just 1-byte-per-pixel
+  index rows concatenated exactly like any other frame already is.
+- **Encoder/decoder (`apxl_codec.c`):** `apxl_encode` detects an indexed
+  first frame, requires every other frame's palette to be byte-identical
+  (rejects the encode otherwise — a per-frame palette isn't representable
+  here, and silently keeping one frame's palette would be a lossy encode
+  wearing a lossless format's name), and writes the palette once. `apxl_decode`
+  reads it back into one `apxl_anim`-level buffer and points every frame's
+  `pxl_image.palette`/`palette_alpha` at it (non-owning, freed once by
+  `apxl_free` — same sharing shape already used for pixel storage).
+- **Tests:** `tests/roundtrip.c`'s `check_anim_indexed` round-trips an indexed
+  animation byte-exact (pixels, palette, alpha) and confirms a mismatched
+  per-frame palette is rejected. `tests/data/Animated_PNG_example_...apxl`
+  regenerated for the version bump (documented, expected — `tests/data/README.md`).
+  500k `pxl_fuzz_decode` iterations under ASan/UBSan clean on the new parsing
+  path (`palette_count`/`palette_alpha_count` are attacker-controlled).
+- **Spec:** `SPEC.md` §10 rewritten for version 2.
+
+**Also done, same day, after the first pass above:**
+
+- **Encoder-side auto-palette (`apxl_anim_try_index`, `src/apxl_codec.c`):**
+  builds the global palette itself from an already-composited RGB/RGBA
+  animation (hash-table colour dedup, two-pass: check the union fits ≤256
+  before mutating anything), converts in place on success, leaves the input
+  completely untouched on failure (verified: pointer identity, not just
+  content, in `tests/roundtrip.c`'s `check_anim_try_index`). This is the
+  "fallback is mandatory" decision from the first pass — done, not open
+  anymore.
+- **CLI (`pxltool`):** `ca` gained `-i` ("try indexed, fall back to RGBA
+  silently"); `ainfo` now prints palette info like still `info` already did.
+- **`apng_save` writes indexed output:** PLTE/tRNS at the file level (once,
+  matching APNG's single-palette convention), correct chunk ordering
+  (cHRM/gAMA/iCCP/sBIT/sRGB/cICP before PLTE, same list `pxl_meta.c` already
+  used for stills). `encode_frame_idat` generalized to take a color type and
+  pixel width instead of assuming RGBA8.
+- **`apng_load` reads indexed *input* correctly:** found by testing, not
+  anticipated — `apng_load`'s per-frame decoder builds a synthetic
+  single-frame PNG per `fcTL`/`fdAT`, and that synthesizer never carried PLTE
+  through, so any indexed source (including `apng_save`'s own new output)
+  failed to load with libpng's "Missing PLTE before IDAT". Fixed by capturing
+  the file's real PLTE/tRNS during the existing chunk walk and passing them
+  into the synthesized single-frame PNGs. Still always expands to RGBA on the
+  way out (unchanged design), it just no longer errors getting there.
+- **Real corpus verification, not just synthetic:** two `bench/gif_corpus.sh`
+  files (`LittleRunner.gif`, `Cloud.gif`) run through GIF → APNG (ffmpeg) →
+  `pxltool ca -i` → `da` → `magick compare -metric AE` against the original
+  APNG: **0 pixels differ** both times. Cloud.gif: 117 483 → 73 285 bytes
+  (37.6% smaller), in line with the corpus-wide measurement.
+- **Safety on the new parsing path:** 500k `pxl_fuzz_decode` iterations
+  (the `.apxl` palette header fields) plus a targeted 3000-mutation check
+  against `apng_load`'s new PLTE/tRNS handling (truncation, byte flips,
+  length-field corruption, PLTE removal, PLTE duplication) — both clean
+  under ASan/UBSan. `apng_load` itself still has no *general* fuzz harness
+  (only `apxl_decode`/`pxl_meta_extract`/`inject` do, via `pxl_fuzz_decode`/
+  `pxl_fuzz_meta`) — worth building one, not done here.
+
+**Not done — still open:**
+
+- **PSP/GE path:** `pxl_convert_palette`/`GU_PSM_T4`/`T8` are still only
+  wired up for still `.pxl` textures; nothing yet takes a decoded indexed
+  `.apxl` frame sequence to a GE-native animated texture the way the "Animated
+  `.apxl` texture playback on PSP" item below describes for RGBA.
+- **No native GIF front end.** The real-corpus verification above went
+  through ffmpeg's GIF→APNG conversion, not a GIF decoder in this project —
+  fine for verification, but means nothing here can take a `.gif` file
+  directly yet.
+- **`apng_load` fuzz coverage**, per the safety note above.
+
 ### Real charts: texture load pipeline, PXL vs PNG, init to use, plus weight
 
 Combines two items already below ("Plot the benchmarks instead of only
@@ -327,6 +446,15 @@ actually tracked. Present locally:
 - Synthetic screenshots from Wikimedia Commons, fetched reproducibly by
   `bench/synthetic_png.sh` (not committed, same reasoning as below) — see
   "Corpus gaps" below for what this closed.
+- Animated GIFs from Wikimedia Commons, fetched reproducibly by
+  `bench/gif_corpus.sh`: 66 files, 101 MB, three categories (Animated pixel
+  art, Throbbers, Animated diagrams) chosen for the indexed-animation
+  question in "Verify: is `.apxl`/APNG actually finished?" above — GIF is
+  always ≤256 colours/frame by format definition, so this is exactly the
+  content class `.apxl` currently has no format for. Licences vary (mostly CC
+  BY-SA, some public domain) and are recorded per file in the corpus's own
+  `MANIFEST.tsv`, the same pattern `synthetic_png.sh` uses. Not yet measured
+  against anything -- fetching it only closes the "no corpus exists" gap.
 
 The gap worth naming: there is still no corpus of synthetic non-photographic
 stills — UI screenshots, diagrams, rendered text. That is the content where a

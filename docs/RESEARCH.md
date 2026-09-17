@@ -1203,3 +1203,92 @@ target is 190 452 (net of the unavoidable PSPSDK floor), not the raw 267 696
 or 311 456 `.text` figures, and none of these three has gone through the
 project's real build pipeline yet. That re-measurement is still worth doing
 properly; it should no longer be expected to find a problem.
+
+### Indexed `.apxl`: does the one-global-palette design fit real content, and is it worth building?
+
+**Why measured.** `ROADMAP.md`'s "Verify: is `.apxl`/APNG actually finished?"
+flagged that indexed animation being "left to a future version" (`SPEC.md`
+§10.1) was never a considered rejection — checked against git history, the
+`.apxl` v1/v2 header froze (`f5d0de6`/`9b05ea0`, 2026-07-25/26) two days
+before indexed-still support existed at all (`314bb18`, 2026-07-27), and the
+still format's own design already anticipated "one global palette per `.apxl`
+stream." The PSP/GE work since (`pxl_convert_palette`, `GU_PSM_T4`/`T8`) gives
+it a real motive: an animated UI icon/sprite is the natural next beneficiary
+of the same decode-straight-to-a-texture, zero-per-frame-conversion win
+stills already have. What was missing was a corpus and a number.
+
+**Corpus.** No existing corpus is indexed/palette content — Anita is RGBA
+hand-drawn, CLIC and Kodak are photographs. `bench/gif_corpus.sh` (2026-09-18)
+fetches one reproducibly from Wikimedia Commons: 66 freely-licensed animated
+GIFs, 101 MB, three categories chosen for the question rather than volume —
+Animated pixel art and Throbbers for the actual PSP UI/game-icon use case,
+Animated diagrams as a deliberately harder stress case (denser, more
+dithered/gradient content). GIF is ≤256 colours/frame by format definition,
+so this is exactly the content class `.apxl` currently has no format for.
+
+**Method.** Two separate questions, since a size win is worthless if the
+precondition never holds. For each GIF: composite every frame to a full RGBA
+canvas (Pillow, disposal-aware), then build **one** palette from the unique
+colours across the *whole* animation (not per frame) — this is the actual
+precondition APXL's "one global palette per stream" design requires. If that
+exceeds 256 colours, the file cannot be losslessly represented this way and is
+recorded as a miss, nothing further computed. If it fits, concatenate frames
+two ways — RGBA8 bytes (what `.apxl` stores today) and 1-byte indices into the
+shared palette (what an indexed `.apxl` would store) — and compress each with
+`bench/rawzstd` (new tool; apxl_encode's *real* default parameters: level 12,
+LDM on, `windowLog` 27), so the comparison is scored the way a real `.apxl`
+file is, not an arbitrary zstd setting.
+
+**Result 1 — the precondition mostly holds, and cleanly splits by content
+class.** 50 of 66 files (76%) fit under one global ≤256-colour palette. All 16
+that don't are from the Animated diagrams stress category; **zero** misses
+among Animated pixel art or Throbbers — the categories that actually match the
+PSP UI/game-icon use case this is aimed at. The one-global-palette design is
+not a universal fit, but for the content it is actually meant for in this
+project, it held on every sample measured.
+
+**Result 2 — for files that fit, indexed compresses smaller in 49 of 50
+files.** Ratio is indexed-compressed / RGBA-compressed, same pixels, same
+compressor settings:
+
+| | value |
+|---|---:|
+| mean ratio (per file) | 0.667 |
+| pooled ratio (total bytes) | 0.679 |
+| best | 0.337 (`Flinthook_animation_-_menu_bounty.gif`) |
+| worst | 1.049 (`Frame_rule_bus.gif`) |
+
+Indexed averages **roughly a third smaller** than RGBA at identical zstd
+settings — on top of, not instead of, whatever LDM already buys. The one loss
+is a 220-byte difference on a 4.5 KB file (4480 → 4700 bytes) — the same
+shape as the tiny-shot outliers in the LDM-per-stream sweep above: noise at
+that scale, not a real counter-pattern. `corr(palette_size, ratio) = -0.032`
+— the win comes from byte density (1 byte/pixel vs 4), essentially independent
+of how many of the 256 slots are actually used.
+
+**Decision: build it.** Both questions this needed to settle before touching
+code came back positive: the design precondition holds for the target content
+class, and the size win is real, substantial, and near-universal once it
+does. **Container and codec done the same day**: `.apxl` bumped to version 2
+(36-byte header, `PaletteCount`/`PaletteAlphaCount`, mirroring the still
+`.pxl` header), `apxl_encode`/`apxl_decode` support one global palette shared
+by every frame (encode rejects a per-frame mismatch rather than silently
+picking one), `tests/roundtrip.c` round-trips it byte-exact and checks the
+rejection case, and 500k fuzz iterations under ASan/UBSan are clean on the
+new parsing path. Turned out simpler than expected: unlike still `.pxl`,
+`.apxl` has no per-frame filter stage to special-case at all — indexed frames
+are just 1-byte-per-pixel rows, no `pixel_bytes`/`filter_width` trick needed.
+
+**Also done the same day**, once the container existed: `apxl_anim_try_index`
+(the encoder-side decision this section's "not done" used to name — build a
+global palette from a source animation, fall back to RGBA above 256 colours),
+`pxltool ca -i`, and `apng_save`/`apng_load` both handling indexed APNGs (the
+latter needed a real fix — its per-frame PNG synthesis never carried PLTE
+through, so indexed input, including `apng_save`'s own new output, failed to
+load until that was found and fixed). Verified end-to-end on two real corpus
+files (`LittleRunner.gif`, `Cloud.gif`, via GIF → APNG → `-i` → decode →
+`magick compare`): **0 pixels differ**, and `Cloud.gif` lands at 37.6%
+smaller, matching this section's corpus-wide number. See `ROADMAP.md`'s
+"Implement indexed `.apxl`" item for the full account, including what's
+still open (PSP/GE playback, a native GIF front end, `apng_load` fuzz
+coverage).

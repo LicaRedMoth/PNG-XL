@@ -375,6 +375,288 @@ static int check_anim(void)
     return ok;
 }
 
+/* Indexed .apxl (version 2, added 2026-09-18 -- see docs/RESEARCH.md's
+   "Indexed .apxl" entry): one global palette shared by every frame, index
+   bytes instead of expanded channels. Also checks that apxl_encode rejects a
+   frame whose palette does not byte-match the first frame's, since a
+   per-frame palette is not representable in this container and silently
+   picking one would be a lossy encode wearing a lossless format's name. */
+static int check_anim_indexed(void)
+{
+    uint32_t W = 16, H = 12, N = 5, f, x, y;
+    size_t cb = (size_t)W * H;                 /* 1 index byte per pixel */
+    static const uint8_t pal_rgb[6 * 3] = {
+        20, 20, 20,   200, 30, 30,   30, 200, 30,
+        30, 30, 200,  220, 220, 30,  0, 0, 0
+    };
+    static const uint8_t pal_a[6] = { 255, 255, 255, 128, 255, 0 };
+    apxl_anim a, d;
+    pxl_buffer enc;
+    uint8_t** ref = NULL;
+    int ok = 1;
+
+    memset(&a, 0, sizeof(a));
+    a.frames = (apxl_frame*)calloc(N, sizeof(apxl_frame));
+    ref = (uint8_t**)calloc(N, sizeof(uint8_t*));
+    if (!a.frames || !ref) { printf("[FAIL] anim_indexed: alloc\n"); free(a.frames); free(ref); return 0; }
+    a.frame_count = N; a.loop_count = 0;
+    a.canvas_w = W; a.canvas_h = H; a.channels = 1; a.bytes_per_channel = 1;
+
+    for (f = 0; f < N; ++f) {
+        uint8_t* buf = (uint8_t*)malloc(cb);
+        ref[f] = (uint8_t*)malloc(cb);
+        if (!buf || !ref[f]) { printf("[FAIL] anim_indexed: frame alloc\n"); ok = 0; break; }
+        for (y = 0; y < H; ++y) {
+            for (x = 0; x < W; ++x) {
+                buf[y * W + x] = (uint8_t)((x + y + f) % 6);
+            }
+        }
+        memcpy(ref[f], buf, cb);
+        a.frames[f].image.buffer.data = buf;
+        a.frames[f].image.buffer.size = cb;
+        a.frames[f].image.width = W; a.frames[f].image.height = H;
+        a.frames[f].image.channels = 1; a.frames[f].image.bytes_per_channel = 1;
+        a.frames[f].image.palette.data = (unsigned char*)pal_rgb;
+        a.frames[f].image.palette.size = sizeof(pal_rgb);
+        a.frames[f].image.palette_alpha.data = (unsigned char*)pal_a;
+        a.frames[f].image.palette_alpha.size = sizeof(pal_a);
+        a.frames[f].delay_num = 1; a.frames[f].delay_den = 10;
+    }
+
+    enc = ok ? apxl_encode(&a, 12) : (pxl_buffer){ NULL, 0 };
+    if (ok && !enc.data) { printf("[FAIL] anim_indexed: encode\n"); ok = 0; }
+
+    memset(&d, 0, sizeof(d));
+    if (ok) {
+        d = apxl_decode(enc);
+        if (!d.frames || d.frame_count != N) { printf("[FAIL] anim_indexed: decode\n"); ok = 0; }
+    }
+    if (ok && (d.palette.size != sizeof(pal_rgb) ||
+               memcmp(d.palette.data, pal_rgb, sizeof(pal_rgb)) != 0)) {
+        printf("[FAIL] anim_indexed: palette RGB differs\n"); ok = 0;
+    }
+    if (ok && (d.palette_alpha.size != sizeof(pal_a) ||
+               memcmp(d.palette_alpha.data, pal_a, sizeof(pal_a)) != 0)) {
+        printf("[FAIL] anim_indexed: palette alpha differs\n"); ok = 0;
+    }
+    if (ok) {
+        for (f = 0; f < N; ++f) {
+            if (memcmp(d.frames[f].image.buffer.data, ref[f], cb) != 0) {
+                printf("[FAIL] anim_indexed: frame %u differs\n", f); ok = 0; break;
+            }
+            if (d.frames[f].image.palette.data != d.palette.data) {
+                printf("[FAIL] anim_indexed: frame %u palette not shared\n", f); ok = 0; break;
+            }
+        }
+    }
+    if (ok) {
+        printf("[ OK ] anim_indexed: %u frames %ux%u, %u-colour palette -> %zu bytes, all lossless\n",
+               N, W, H, (unsigned)(sizeof(pal_rgb) / 3), enc.size);
+    }
+    pxl_free(&enc);
+    apxl_free(&d);
+
+    /* Negative case: frame N-1 gets a palette that differs by one byte.
+       apxl_encode must refuse rather than silently keep frame 0's palette. */
+    if (ok) {
+        static uint8_t bad_rgb[6 * 3];
+        pxl_buffer bad_enc;
+        memcpy(bad_rgb, pal_rgb, sizeof(pal_rgb));
+        bad_rgb[0] ^= 1u;
+        a.frames[N - 1].image.palette.data = bad_rgb;
+        bad_enc = apxl_encode(&a, 12);
+        if (bad_enc.data) {
+            printf("[FAIL] anim_indexed: mismatched per-frame palette was not rejected\n");
+            ok = 0;
+            pxl_free(&bad_enc);
+        } else {
+            printf("[ OK ] anim_indexed: mismatched per-frame palette rejected\n");
+        }
+        a.frames[N - 1].image.palette.data = (unsigned char*)pal_rgb; /* restore before free */
+    }
+
+    /* apxl_free never touches frame-level .image.palette/.palette_alpha (only
+       the anim-level copies, which `a` never sets), so it's safe here even
+       though those fields point at static storage -- same as check_anim. */
+    apxl_free(&a);
+    if (ref) { for (f = 0; f < N; ++f) free(ref[f]); free(ref); }
+    return ok;
+}
+
+/* apxl_anim_try_index (added 2026-09-18): builds the global palette itself,
+   rather than being handed one already matching like check_anim_indexed
+   above -- this is the path a real caller (pxltool ca -i) actually uses.
+   Two cases: a source under 256 colours converts and round-trips through the
+   full apxl_encode/decode/apng_save loop bit-exact; a source with too many
+   colours is rejected and left completely untouched. */
+static int check_anim_try_index(void)
+{
+    uint32_t W = 20, H = 15, N = 4, f, x, y;
+    uint8_t ch = 4, bpc = 1;
+    size_t cb_rgba = (size_t)W * H * ch;
+    apxl_anim a, d;
+    pxl_buffer enc;
+    uint8_t** ref_rgba = NULL; /* original pixels, kept for comparison */
+    int ok = 1;
+
+    /* Case 1: a small, deliberately-below-256 palette (9 colours: (x%3,y%3,f)
+       triples scaled up, plus a constant alpha). */
+    memset(&a, 0, sizeof(a));
+    a.frames = (apxl_frame*)calloc(N, sizeof(apxl_frame));
+    ref_rgba = (uint8_t**)calloc(N, sizeof(uint8_t*));
+    if (!a.frames || !ref_rgba) { printf("[FAIL] anim_try_index: alloc\n"); free(a.frames); free(ref_rgba); return 0; }
+    a.frame_count = N; a.loop_count = 0;
+    a.canvas_w = W; a.canvas_h = H; a.channels = ch; a.bytes_per_channel = bpc;
+
+    for (f = 0; f < N; ++f) {
+        uint8_t* buf = (uint8_t*)malloc(cb_rgba);
+        ref_rgba[f] = (uint8_t*)malloc(cb_rgba);
+        if (!buf || !ref_rgba[f]) { printf("[FAIL] anim_try_index: frame alloc\n"); ok = 0; break; }
+        for (y = 0; y < H; ++y) {
+            for (x = 0; x < W; ++x) {
+                size_t o = ((size_t)y * W + x) * 4;
+                buf[o + 0] = (uint8_t)((x % 3) * 80);
+                buf[o + 1] = (uint8_t)((y % 3) * 80);
+                buf[o + 2] = (uint8_t)(f * 60);
+                buf[o + 3] = 255;
+            }
+        }
+        memcpy(ref_rgba[f], buf, cb_rgba);
+        a.frames[f].image.buffer.data = buf;
+        a.frames[f].image.buffer.size = cb_rgba;
+        a.frames[f].image.width = W; a.frames[f].image.height = H;
+        a.frames[f].image.channels = ch; a.frames[f].image.bytes_per_channel = bpc;
+        a.frames[f].delay_num = 1; a.frames[f].delay_den = 10;
+    }
+
+    if (ok && !apxl_anim_try_index(&a)) {
+        printf("[FAIL] anim_try_index: expected conversion (<=256 colours)\n");
+        ok = 0;
+    }
+    if (ok && a.channels != 1) {
+        printf("[FAIL] anim_try_index: channels not set to 1 after conversion\n");
+        ok = 0;
+    }
+    /* Every frame's index, looked up through the palette apxl_anim_try_index
+       built itself, must reconstruct the exact original RGBA pixels. */
+    if (ok) {
+        for (f = 0; f < N && ok; ++f) {
+            const uint8_t* idx = a.frames[f].image.buffer.data;
+            for (y = 0; y < H && ok; ++y) {
+                for (x = 0; x < W && ok; ++x) {
+                    uint8_t s = idx[y * W + x];
+                    const uint8_t* rgb = a.palette.data + (size_t)s * 3;
+                    const uint8_t* orig = ref_rgba[f] + ((size_t)y * W + x) * 4;
+                    if (rgb[0] != orig[0] || rgb[1] != orig[1] || rgb[2] != orig[2]) {
+                        printf("[FAIL] anim_try_index: frame %u (%u,%u) palette lookup mismatch\n",
+                               f, x, y);
+                        ok = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    enc = ok ? apxl_encode(&a, 12) : (pxl_buffer){ NULL, 0 };
+    if (ok && !enc.data) { printf("[FAIL] anim_try_index: encode\n"); ok = 0; }
+    memset(&d, 0, sizeof(d));
+    if (ok) {
+        d = apxl_decode(enc);
+        if (!d.frames || d.frame_count != N) { printf("[FAIL] anim_try_index: decode\n"); ok = 0; }
+    }
+    if (ok) {
+        /* apng_save must now accept an indexed apxl_anim (2026-09-18) and
+           reproduce the same pixels through libpng's own PLTE/IDAT reader. */
+        char path[] = "pxl_try_index_tmp.apng";
+        apxl_anim reloaded;
+        memset(&reloaded, 0, sizeof(reloaded));
+        if (!apng_save(path, &d)) {
+            printf("[FAIL] anim_try_index: apng_save rejected an indexed anim\n");
+            ok = 0;
+        } else {
+            reloaded = apng_load(path);
+            remove(path);
+            if (!reloaded.frames || reloaded.frame_count != N) {
+                printf("[FAIL] anim_try_index: apng_load of the saved file failed\n");
+                ok = 0;
+            } else {
+                for (f = 0; f < N && ok; ++f) {
+                    if (memcmp(reloaded.frames[f].image.buffer.data, ref_rgba[f], cb_rgba) != 0) {
+                        printf("[FAIL] anim_try_index: frame %u differs after APNG round trip\n", f);
+                        ok = 0;
+                    }
+                }
+            }
+        }
+        apxl_free(&reloaded);
+    }
+    if (ok) {
+        printf("[ OK ] anim_try_index: %u frames %ux%u, auto-built %u-colour palette, "
+               "APXL %zu bytes, full APNG round trip lossless\n",
+               N, W, H, (unsigned)(a.palette.size / 3), enc.size);
+    }
+    pxl_free(&enc);
+    apxl_free(&a);
+    apxl_free(&d);
+    if (ref_rgba) { for (f = 0; f < N; ++f) free(ref_rgba[f]); free(ref_rgba); }
+    if (!ok) { return 0; }
+
+    /* Case 2: more than 256 colours (a smooth gradient) must be rejected,
+       and `a` must come back completely untouched -- still RGBA, same
+       pixels, still encodable as a normal (non-indexed) animation. */
+    {
+        uint32_t W2 = 32, H2 = 32, N2 = 1;
+        size_t cb2 = (size_t)W2 * H2 * 4;
+        apxl_anim g;
+        uint8_t* buf;
+        pxl_buffer enc2;
+
+        memset(&g, 0, sizeof(g));
+        g.frames = (apxl_frame*)calloc(N2, sizeof(apxl_frame));
+        buf = (uint8_t*)malloc(cb2);
+        if (!g.frames || !buf) { printf("[FAIL] anim_try_index: gradient alloc\n"); free(g.frames); free(buf); return 0; }
+        g.frame_count = N2; g.canvas_w = W2; g.canvas_h = H2;
+        g.channels = 4; g.bytes_per_channel = 1;
+        for (y = 0; y < H2; ++y) {
+            for (x = 0; x < W2; ++x) {
+                size_t o = ((size_t)y * W2 + x) * 4;
+                /* Every pixel distinct: > 256 colours across a 32x32 image. */
+                buf[o + 0] = (uint8_t)x; buf[o + 1] = (uint8_t)y;
+                buf[o + 2] = (uint8_t)(x ^ y); buf[o + 3] = 255;
+            }
+        }
+        g.frames[0].image.buffer.data = buf;
+        g.frames[0].image.buffer.size = cb2;
+        g.frames[0].image.width = W2; g.frames[0].image.height = H2;
+        g.frames[0].image.channels = 4; g.frames[0].image.bytes_per_channel = 1;
+        g.frames[0].delay_num = 1; g.frames[0].delay_den = 10;
+
+        if (apxl_anim_try_index(&g)) {
+            printf("[FAIL] anim_try_index: >256-colour source was not rejected\n");
+            ok = 0;
+        } else if (g.channels != 4 || g.palette.data != NULL ||
+                   g.frames[0].image.buffer.data != buf) {
+            /* Pointer identity, not content: proves no reallocation/mutation
+               happened at all, a stronger check than comparing a buffer to
+               itself would be. */
+            printf("[FAIL] anim_try_index: rejected source was not left untouched\n");
+            ok = 0;
+        } else {
+            enc2 = apxl_encode(&g, 12);
+            if (!enc2.data) {
+                printf("[FAIL] anim_try_index: rejected source no longer encodes as RGBA\n");
+                ok = 0;
+            } else {
+                printf("[ OK ] anim_try_index: >256-colour source rejected and left as RGBA, "
+                       "still encodes (%zu bytes)\n", enc2.size);
+                pxl_free(&enc2);
+            }
+        }
+        apxl_free(&g);
+    }
+    return ok;
+}
+
 /*----------------------------------------------------------------------------
   Streaming (progressive) decode
 ----------------------------------------------------------------------------*/
@@ -1359,6 +1641,8 @@ int main(int argc, char** argv)
     failures += !check_adaptive();
     failures += !check_fast_decode_excludes_adaptive();
     failures += !check_anim();
+    failures += !check_anim_indexed();
+    failures += !check_anim_try_index();
 
     /* Progressive encode must never pick BCIF, and must stream row by row. */
     failures += !check_stream_one("gray8_prog",  100, 80, 1, 1,

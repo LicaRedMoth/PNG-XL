@@ -37,10 +37,13 @@
 #include "demux.h"
 #include "internal.h"
 
-/* Header layout, little-endian (see SPEC.md 10):
+/* Header layout, little-endian (see SPEC.md 10; version 2, 36 bytes total --
+ * bytes 32/34 add PaletteCount/PaletteAlphaCount for indexed animation, added
+ * 2026-09-18, unused by this probe since everything it checks fits in the
+ * first 20 bytes):
  *   0 magic "APXL", 4 version, 5 channels, 6 bytesPerChannel, 7 flags,
  *   8 canvasW, 12 canvasH, 16 frameCount, 20 loopCount, 24 metaBytes,
- *   28 rawBytes.  */
+ *   28 rawBytes, 32 paletteCount, 34 paletteAlphaCount. */
 #define APXL_HEADER_BYTES 32
 
 static int apxl_probe(const AVProbeData *p)

@@ -140,10 +140,20 @@ static int decode_frame_png(const unsigned char* png_bytes, size_t png_size,
     return ok;
 }
 
-/* Build a standalone single-frame PNG (RGBA8, w x h) from raw image-data chunk
-   bytes (concatenated IDAT/fdAT payloads) plus a source IHDR to copy depth /
-   color type from. Returns a growbuf the caller must free. */
+/* Build a standalone single-frame PNG (w x h) from raw image-data chunk bytes
+   (concatenated IDAT/fdAT payloads) plus a source IHDR to copy depth / color
+   type from. decode_frame_png always expands the result to RGBA8 regardless
+   of source color type, indexed included (png_set_palette_to_rgb) -- this
+   only has to be a PNG libpng can *read*, not one matching apng_load's own
+   output format. When the source is indexed (color type 3), `plte`/`trns`
+   must be that file's real PLTE/tRNS bytes: without a PLTE chunk libpng
+   refuses IDAT for that color type outright ("Missing PLTE before IDAT"),
+   which is exactly what surfaced this when a round trip through an indexed
+   apng_save() output was first tested (2026-09-18). Returns a growbuf the
+   caller must free. */
 static growbuf synth_png(const unsigned char* ihdr, uint32_t w, uint32_t h,
+                         const unsigned char* plte, size_t plte_len,
+                         const unsigned char* trns, size_t trns_len,
                          const unsigned char* idat, size_t idat_len)
 {
     growbuf g;
@@ -161,6 +171,10 @@ static growbuf synth_png(const unsigned char* ihdr, uint32_t w, uint32_t h,
 
     gb_put(&g, PNG_SIG, 8);
     gb_chunk(&g, "IHDR", hdr, 13);
+    if (ihdr[9] == PNG_COLOR_TYPE_PALETTE && plte && plte_len) {
+        gb_chunk(&g, "PLTE", plte, plte_len);
+        if (trns && trns_len) { gb_chunk(&g, "tRNS", trns, trns_len); }
+    }
     gb_chunk(&g, "IDAT", idat, idat_len);
     gb_chunk(&g, "IEND", NULL, 0);
     return g;
@@ -186,6 +200,8 @@ apxl_anim apng_load(const char* path)
     size_t file_size = 0, pos;
     unsigned char ihdr[13];
     int have_ihdr = 0;
+    const unsigned char* plte_data = NULL; uint32_t plte_len = 0;
+    const unsigned char* trns_data = NULL; uint32_t trns_len = 0;
     uint32_t canvas_w = 0, canvas_h = 0, num_plays = 0;
     frame_ctl* fctls = NULL;
     uint32_t fcap = 0, fcount = 0;
@@ -224,6 +240,12 @@ apxl_anim apng_load(const char* path)
             have_ihdr = 1;
         } else if (memcmp(type, "acTL", 4) == 0 && len >= 8) {
             num_plays = pxl_get_be32(data + 4);
+        } else if (memcmp(type, "PLTE", 4) == 0) {
+            /* One global palette for the whole file, same as the still PNG
+               case and as .apxl's own indexed design -- not per frame. */
+            plte_data = data; plte_len = len;
+        } else if (memcmp(type, "tRNS", 4) == 0) {
+            trns_data = data; trns_len = len;
         } else if (memcmp(type, "fcTL", 4) == 0 && len >= 26) {
             frame_ctl fc;
             memset(&fc, 0, sizeof(fc));
@@ -276,7 +298,8 @@ apxl_anim apng_load(const char* path)
         growbuf spng;
         uint8_t* rgba = (uint8_t*)malloc(canvas_bytes);
         if (!rgba || !idat_default.data) { free(rgba); goto fail; }
-        spng = synth_png(ihdr, canvas_w, canvas_h, idat_default.data, idat_default.size);
+        spng = synth_png(ihdr, canvas_w, canvas_h, plte_data, plte_len, trns_data, trns_len,
+                         idat_default.data, idat_default.size);
         if (spng.failed || !decode_frame_png(spng.data, spng.size, canvas_w, canvas_h, rgba)) {
             free(spng.data); free(rgba); goto fail;
         }
@@ -334,7 +357,7 @@ apxl_anim apng_load(const char* path)
 
         region = (uint8_t*)malloc((size_t)fc->w * fc->h * 4);
         if (!region) { goto fail; }
-        spng = synth_png(ihdr, fc->w, fc->h, fdata, fdlen);
+        spng = synth_png(ihdr, fc->w, fc->h, plte_data, plte_len, trns_data, trns_len, fdata, fdlen);
         if (spng.failed || !decode_frame_png(spng.data, spng.size, fc->w, fc->h, region)) {
             free(spng.data); free(region); goto fail;
         }
@@ -432,7 +455,14 @@ fail:
 /* Compress one full-canvas RGBA8 frame into a PNG IDAT-style zlib stream by
    letting libpng write a standalone PNG to memory, then extracting its IDAT
    payload(s) concatenated. Returns malloc'd buffer via *out (caller frees). */
-static int encode_frame_idat(const uint8_t* rgba, uint32_t w, uint32_t h,
+/* pixel_bytes is 4 for RGBA8 or 1 for an 8-bit indexed frame (color_type
+   PNG_COLOR_TYPE_PALETTE, in which case pal_rgb/pal_count must describe the
+   real palette -- libpng requires PLTE set before png_write_info for this
+   color type, even though only this call's IDAT output is kept; the real
+   file-level PLTE/tRNS are written once by the caller, see apng_save). */
+static int encode_frame_idat(const uint8_t* pixels, uint32_t w, uint32_t h,
+                             int color_type, unsigned pixel_bytes,
+                             const unsigned char* pal_rgb, int pal_count,
                              unsigned char** out, size_t* out_len)
 {
     png_structp png = NULL;
@@ -457,16 +487,27 @@ static int encode_frame_idat(const uint8_t* rgba, uint32_t w, uint32_t h,
     }
 
     png_set_write_fn(png, &writer, pxl_png_write_mem, pxl_png_flush_mem);
-    png_set_IHDR(png, info, w, h, 8, PNG_COLOR_TYPE_RGB_ALPHA,
+    png_set_IHDR(png, info, w, h, 8, color_type,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
                  PNG_FILTER_TYPE_DEFAULT);
+    if (color_type == PNG_COLOR_TYPE_PALETTE) {
+        png_color pal[PNG_MAX_PALETTE_LENGTH];
+        int pi;
+        for (pi = 0; pi < pal_count; ++pi) {
+            pal[pi].red   = pal_rgb[pi * 3 + 0];
+            pal[pi].green = pal_rgb[pi * 3 + 1];
+            pal[pi].blue  = pal_rgb[pi * 3 + 2];
+        }
+        /* libpng copies the array; it does not retain the pointer. */
+        png_set_PLTE(png, info, pal, pal_count);
+    }
     png_write_info(png, info);
     {
         png_uint_32 y;
         rows = (png_bytep*)malloc(sizeof(png_bytep) * h);
         if (!rows) { png_longjmp(png, 1); }
         for (y = 0; y < h; ++y) {
-            rows[y] = (png_bytep)(rgba + (size_t)y * w * 4);
+            rows[y] = (png_bytep)(pixels + (size_t)y * w * pixel_bytes);
         }
         png_write_image(png, rows);
     }
@@ -494,22 +535,76 @@ static int encode_frame_idat(const uint8_t* rgba, uint32_t w, uint32_t h,
     return 1;
 }
 
+/* cHRM/gAMA/iCCP/sBIT/sRGB/cICP MUST precede PLTE per the PNG spec -- same
+   list pxl_meta.c's must_precede_plte uses for the still format. Only
+   matters when writing an indexed animation, since that's the only case
+   with a PLTE at all; the RGBA path writes every preserved chunk in one pass
+   as before, unaffected by this. */
+static int apng_meta_must_precede_plte(const unsigned char* type)
+{
+    static const char* early[] = { "cHRM", "gAMA", "iCCP", "sBIT", "sRGB", "cICP", NULL };
+    int i;
+    for (i = 0; early[i]; ++i) {
+        if (memcmp(type, early[i], 4) == 0) { return 1; }
+    }
+    return 0;
+}
+
+/* Writes preserved ancillary chunks from `meta`. If `split`, writes only
+   those chunks whose apng_meta_must_precede_plte() matches `want_early` --
+   call twice (1 then 0) around PLTE. If not `split`, writes everything,
+   unconditionally, in original order (the non-indexed path, byte-identical
+   to this function's behaviour before indexed output existed). */
+static void apng_write_metadata(growbuf* g, const pxl_buffer* meta, int split, int want_early)
+{
+    const unsigned char* m;
+    size_t mpos;
+    if (!meta->data || !meta->size) { return; }
+    m = meta->data;
+    mpos = 0;
+    while (mpos + 8 <= meta->size) {
+        uint32_t mlen = pxl_get_le32(m + mpos + 4);
+        if (mpos > meta->size || meta->size - mpos < 8 ||
+            (size_t)mlen > meta->size - mpos - 8) {
+            break;  /* truncated record: stop, keep what we have */
+        }
+        if (!split || apng_meta_must_precede_plte(m + mpos) == want_early) {
+            gb_chunk(g, (const char*)(m + mpos), m + mpos + 8, mlen);
+        }
+        mpos += 8 + mlen;
+    }
+}
+
 int apng_save(const char* path, const apxl_anim* anim)
 {
     growbuf g;
     unsigned char ihdr[13], actl[8], fctl[26];
     uint32_t seq = 0, i;
     int ok = 0;
+    int indexed;
+    int pal_count;
+    unsigned pixel_bytes;
+    int color_type;
 
     memset(&g, 0, sizeof(g));
     if (!anim || !anim->frames || anim->frame_count == 0) { return 0; }
 
+    /* Indexed animation (added 2026-09-18, see docs/RESEARCH.md's "Indexed
+       .apxl" entry and apxl_anim_try_index): one global palette for the
+       whole file, written as a single top-level PLTE/tRNS, matching APNG's
+       own single-PLTE-per-file convention -- not a palette per frame. */
+    indexed = (anim->palette.data && anim->palette.size > 0) ? 1 : 0;
+    pal_count = indexed ? (int)(anim->palette.size / 3u) : 0;
+    if (indexed && (pal_count == 0 || pal_count > PNG_MAX_PALETTE_LENGTH)) { return 0; }
+    color_type = indexed ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_RGB_ALPHA;
+    pixel_bytes = indexed ? 1u : 4u;
+
     gb_put(&g, PNG_SIG, 8);
 
-    /* IHDR: canvas, RGBA8. */
+    /* IHDR: canvas. */
     pxl_put_be32(ihdr + 0, anim->canvas_w);
     pxl_put_be32(ihdr + 4, anim->canvas_h);
-    ihdr[8] = 8; ihdr[9] = PNG_COLOR_TYPE_RGB_ALPHA;
+    ihdr[8] = 8; ihdr[9] = (unsigned char)color_type;
     ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
     gb_chunk(&g, "IHDR", ihdr, 13);
 
@@ -518,19 +613,18 @@ int apng_save(const char* path, const apxl_anim* anim)
        ones PNG constrains -- the color-space chunks -- MUST precede IDAT, so
        this position satisfies all of them at once. Emitted before acTL to keep
        the animation control chunks adjacent to the frames they describe. */
-    if (anim->metadata.data && anim->metadata.size) {
-        const unsigned char* m = anim->metadata.data;
-        size_t mpos = 0;
-        while (mpos + 8 <= anim->metadata.size) {
-            uint32_t mlen = pxl_get_le32(m + mpos + 4);
-            if (mpos > anim->metadata.size ||
-                anim->metadata.size - mpos < 8 ||
-                (size_t)mlen > anim->metadata.size - mpos - 8) {
-                break;  /* truncated record: stop, keep what we have */
-            }
-            gb_chunk(&g, (const char*)(m + mpos), m + mpos + 8, mlen);
-            mpos += 8 + mlen;
+    if (indexed) {
+        apng_write_metadata(&g, &anim->metadata, 1, 1); /* cHRM/gAMA/... first */
+        /* anim->palette.data is already 3 bytes/entry RGB in file order --
+           exactly PLTE's payload, no conversion needed (unlike the png_color
+           array encode_frame_idat below needs for libpng's own API). */
+        gb_chunk(&g, "PLTE", anim->palette.data, anim->palette.size);
+        if (anim->palette_alpha.data && anim->palette_alpha.size) {
+            gb_chunk(&g, "tRNS", anim->palette_alpha.data, anim->palette_alpha.size);
         }
+        apng_write_metadata(&g, &anim->metadata, 1, 0); /* everything else */
+    } else {
+        apng_write_metadata(&g, &anim->metadata, 0, 0);
     }
 
     /* acTL: num_frames, num_plays. */
@@ -542,14 +636,16 @@ int apng_save(const char* path, const apxl_anim* anim)
         const pxl_image* im = &anim->frames[i].image;
         unsigned char* idat = NULL;
         size_t idat_len = 0;
-        uint8_t* rgba = im->buffer.data;
+        uint8_t* pixels = im->buffer.data;
         uint8_t* tmp = NULL;
 
-        if (!rgba) { goto done; }
+        if (!pixels) { goto done; }
 
-        /* Ensure RGBA8; if the frame isn't, we don't attempt conversion here
-           (apng_load always yields RGBA8, which is our normal path). */
-        if (im->channels != 4 || im->bytes_per_channel != 1 ||
+        /* Ensure the frame matches what the file header committed to; if it
+           doesn't, we don't attempt conversion here (apng_load always yields
+           RGBA8 for the non-indexed path, apxl_anim_try_index's output is
+           always self-consistent for the indexed one). */
+        if (im->channels != (indexed ? 1u : 4u) || im->bytes_per_channel != 1 ||
             im->width != anim->canvas_w || im->height != anim->canvas_h) {
             goto done;
         }
@@ -570,7 +666,9 @@ int apng_save(const char* path, const apxl_anim* anim)
         fctl[25] = BLEND_SOURCE;
         gb_chunk(&g, "fcTL", fctl, 26);
 
-        if (!encode_frame_idat(rgba, anim->canvas_w, anim->canvas_h, &idat, &idat_len)) {
+        if (!encode_frame_idat(pixels, anim->canvas_w, anim->canvas_h,
+                               color_type, pixel_bytes,
+                               anim->palette.data, pal_count, &idat, &idat_len)) {
             free(tmp); goto done;
         }
         free(tmp);

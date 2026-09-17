@@ -43,16 +43,28 @@ typedef struct {
     uint32_t    loop_count;   /* 0 = infinite */
     uint32_t    canvas_w;
     uint32_t    canvas_h;
-    uint8_t     channels;         /* 1..4 */
+    uint8_t     channels;         /* 1..4; 1 with a non-empty palette means indexed */
     uint8_t     bytes_per_channel;/* 1 or 2 */
     pxl_buffer  metadata;         /* preserved ancillary chunks (may be empty) */
+    /* Indexed animations (measured 2026-09-18, see docs/RESEARCH.md's
+       "Indexed .apxl" entry): one palette for the whole stream, matching
+       APNG's single PLTE and the still .pxl format's own design note. Empty
+       (data == NULL) for non-indexed animations. Every frame's pxl_image
+       must carry byte-identical palette/palette_alpha to this one --
+       apxl_encode rejects a mismatch rather than silently picking one frame's
+       palette. Only 8-bit indices are supported; a sub-8-bit indexed source
+       must be expanded before it reaches apxl_encode. */
+    pxl_buffer  palette;          /* 3 bytes/entry RGB, else empty */
+    pxl_buffer  palette_alpha;    /* optional 1 byte/entry alpha, else empty */
     /* Frames decoded by apxl_decode all point into this one block rather than
        owning separate buffers: the decompressed stream is already the frame
        sequence, so copying each frame out of it doubled peak memory for no
        gain. apxl_free releases the block and leaves the frame buffers alone.
        Animations assembled by hand (apng_load, the encoder's callers) leave
        this empty and keep owning their frames individually, so both shapes
-       free correctly. */
+       free correctly. Decoded indexed frames' pxl_image.palette/palette_alpha
+       are likewise non-owning copies of this struct's palette/palette_alpha
+       above -- apxl_free releases the shared buffer once, not per frame. */
     pxl_buffer  storage;
 } apxl_anim;
 
@@ -69,6 +81,23 @@ apxl_anim apxl_decode(pxl_buffer file);
 
 /* Release all frames, their images, and metadata; zero the struct. */
 void apxl_free(apxl_anim* anim);
+
+/* Attempts to convert an already-composited RGB/RGBA (8-bit, non-indexed)
+   animation to indexed in place: one global palette built from the union of
+   every frame's colours, each frame's pixels replaced with 1-byte indices
+   into it. Measured 2026-09-18 (docs/RESEARCH.md's "Indexed .apxl" entry):
+   worth doing whenever it applies -- ~33% smaller than RGBA at .apxl's real
+   compression settings on 49 of 50 real animations that fit.
+
+   Returns 1 and mutates `anim` (channels becomes 1, bytes_per_channel 1,
+   anim->palette/palette_alpha and every frame's image.palette/palette_alpha
+   set) on success. Returns 0 and leaves `anim` completely untouched if the
+   source isn't RGB/RGBA 8-bit, if any frame is already indexed, or if the
+   union of colours across all frames exceeds 256 -- the measurement found
+   this holds for 76% of real animations sampled and 100% of UI/game-icon
+   content specifically, but never all of it, so a caller must always be
+   prepared for 0 and fall back to a plain apxl_encode() of the RGBA input. */
+int apxl_anim_try_index(apxl_anim* anim);
 
 #ifdef __cplusplus
 }
