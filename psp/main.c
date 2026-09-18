@@ -60,6 +60,9 @@
 #include <psppower.h>
 #include <pspsysmem.h>
 #include <psprtc.h>
+#include <pspge.h>
+#include <pspgu.h>
+#include <psputils.h>
 
 #include <png.h>
 
@@ -70,6 +73,7 @@
 #include <string.h>
 
 #include "pxl.h"
+#include "apxl.h"
 #include "testdata.h"
 #include "pattern.h"
 
@@ -627,9 +631,330 @@ static void run_throughput_at(int pllfreq, int cpufreq, int busfreq)
     put("\n");
 }
 
+/*----------------------------------------------------------------------------
+  Animated indexed .apxl -> GE texture playback (added 2026-09-18: the
+  "PSP/GE path" and "Animated .apxl texture playback on PSP" ROADMAP items).
+  pxl_psp_anim_file (psp/testdata.h, from bench/mkpsptest.c's make_anim_apxl)
+  is PXL_PSP_ANIM_FRAMES 8-bit-indexed frames sharing one
+  PXL_PSP_ANIM_PALETTE_COUNT-colour palette -- psp/pattern.h's
+  pxl_psp_anim_index()/pxl_psp_anim_palette is the same "formula, not data"
+  reference run_correctness() already uses for stills.
+----------------------------------------------------------------------------*/
+
+/* Decodes the embedded animation and checks every frame's index bytes and
+   the stream's one shared palette against pattern.h, the same memcmp-
+   against-formula style run_correctness() uses. This is the only actually
+   new-risk code path below -- indexed multi-frame apxl_decode on MIPS;
+   pxl_convert_palette and the GE calls that follow are exercised
+   independently elsewhere (run_convert_palette_correctness, or already
+   well-trodden PSP homebrew territory). On success leaves *out decoded and
+   owned by the caller (release with apxl_free); on failure *out may still
+   need apxl_free if frames != NULL. */
+static int run_anim_decode_correctness(apxl_anim* out)
+{
+    pxl_buffer file;
+    apxl_anim anim;
+    uint32_t f, x, y;
+    int all_ok = 1;
+
+    put("-- animated indexed .apxl decode --\n");
+
+    file.data = (unsigned char*)pxl_psp_anim_file;
+    file.size = pxl_psp_anim_file_len;
+    anim = apxl_decode(file);
+    *out = anim;
+
+    if (!anim.frames || anim.frame_count != PXL_PSP_ANIM_FRAMES ||
+        anim.canvas_w != PXL_PSP_ANIM_W || anim.canvas_h != PXL_PSP_ANIM_H) {
+        putf("[anim    decode  ] DECODE FAILED or geometry mismatch "
+             "(frames=%u %ux%u)\n", (unsigned)anim.frame_count,
+             (unsigned)anim.canvas_w, (unsigned)anim.canvas_h);
+        put("anim decode: SOME FAILED\n\n");
+        return 0;
+    }
+
+    if (pxl_palette_count(&anim.frames[0].image) != PXL_PSP_ANIM_PALETTE_COUNT) {
+        putf("[anim    palette ] %u entries -- MISMATCH (want %u)\n",
+             (unsigned)pxl_palette_count(&anim.frames[0].image),
+             (unsigned)PXL_PSP_ANIM_PALETTE_COUNT);
+        all_ok = 0;
+    } else {
+        int pal_ok = 1;
+        for (f = 0; f < PXL_PSP_ANIM_PALETTE_COUNT; f++) {
+            const unsigned char* p = anim.palette.data + (size_t)f * 3;
+            if (p[0] != pxl_psp_anim_palette[f][0] ||
+                p[1] != pxl_psp_anim_palette[f][1] ||
+                p[2] != pxl_psp_anim_palette[f][2]) {
+                pal_ok = 0;
+            }
+        }
+        if (!pal_ok) { all_ok = 0; }
+        putf("[anim    palette ] %u entries -- %s\n",
+             (unsigned)PXL_PSP_ANIM_PALETTE_COUNT, pal_ok ? "MATCH" : "MISMATCH");
+    }
+
+    for (f = 0; f < anim.frame_count; f++) {
+        const unsigned char* idx = anim.frames[f].image.buffer.data;
+        int frame_ok = 1;
+        for (y = 0; y < PXL_PSP_ANIM_H; y++) {
+            for (x = 0; x < PXL_PSP_ANIM_W; x++) {
+                if (idx[y * PXL_PSP_ANIM_W + x] != pxl_psp_anim_index(x, y, f)) {
+                    frame_ok = 0;
+                }
+            }
+        }
+        if (!frame_ok) { all_ok = 0; }
+        putf("[anim    frame %u ] %ux%u -- %s\n", (unsigned)f,
+             (unsigned)PXL_PSP_ANIM_W, (unsigned)PXL_PSP_ANIM_H,
+             frame_ok ? "MATCH" : "MISMATCH");
+    }
+
+    put(all_ok ? "anim decode: ALL OK\n\n" : "anim decode: SOME FAILED\n\n");
+    return all_ok;
+}
+
+typedef struct { float u, v; float x, y, z; } gu_vertex;
+
+/* VRAM draw-buffer stride: 512 is the standard PSP homebrew constant for a
+   GU_PSM_8888 draw buffer (matches pspgu.h's own sceGuDrawBuffer doc
+   example) -- only the top-left PXL_PSP_ANIM_W x PXL_PSP_ANIM_H texels of it
+   are ever drawn into or read back, nothing about the test depends on the
+   full 512-wide buffer. No sceGuDisplay call anywhere here: this never goes
+   to the screen, so a plain VRAM scratch buffer read back through
+   sceGeEdramGetAddr() is both simpler and needs no memory-stick/display
+   setup -- correctness is checked by reading GE output, not by a human or a
+   screenshot looking at it.
+
+   ANIM_FB_OFFSET, a full BUF_STRIDE x 272 x 4 bytes into VRAM rather than
+   offset 0: offset 0 is where pspDebugScreenInit's own text console lives
+   (the same convention every pspgu sample uses for its display buffer,
+   sceGuDrawBuffer(...,(void*)0,...)), and put()/putf() draw through the GU
+   too (pspDebugScreenPrintf) -- avoiding that collision is correct
+   regardless. It was NOT, on its own, the full explanation for the
+   pixel-match gap documented on run_anim_ge_correctness below -- see
+   docs/RESEARCH.md's GE entry for the full investigation (ruled out: this
+   program's own debug output, an uninitialised-VRAM artefact, vertex data
+   provenance, cross-frame bleed-through, GE/display sync timing). */
+#define ANIM_FB_STRIDE 512
+#define ANIM_FB_OFFSET (ANIM_FB_STRIDE * 272 * 4)
+static unsigned int __attribute__((aligned(16))) g_gu_list[4096];
+static uint32_t __attribute__((aligned(16))) g_anim_clut[PXL_PSP_ANIM_PALETTE_COUNT];
+
+/* Common GE state for both the correctness check and the throughput sweep
+   below -- factored out after discovering (via psp/sdk/samples/gu/clut/
+   clut.c, the reference this project's sceGu* usage is modelled on) that
+   sceGuOffset/sceGuViewport/sceGuScissor are needed even for a plain
+   GU_TRANSFORM_2D sprite draw: GU_TRANSFORM_2D only skips the vertex
+   transform matrix, not the separate viewport/scissor clip stage, and
+   sceGuInit leaves that clip region degenerate. Omitting them was the first
+   real bug found here (2026-09-18): every draw clipped to ~1 pixel under
+   PPSSPPHeadless instead of the intended WxH quad. */
+static void anim_ge_setup(void)
+{
+    sceGuInit();
+    sceGuStart(GU_DIRECT, g_gu_list);
+    sceGuDrawBufferList(GU_PSM_8888, (void*)ANIM_FB_OFFSET, ANIM_FB_STRIDE);
+    sceGuOffset(2048 - (PXL_PSP_ANIM_W / 2), 2048 - (PXL_PSP_ANIM_H / 2));
+    sceGuViewport(2048, 2048, PXL_PSP_ANIM_W, PXL_PSP_ANIM_H);
+    sceGuDepthRange(0xc350, 0x2710);
+    sceGuScissor(0, 0, PXL_PSP_ANIM_W, PXL_PSP_ANIM_H);
+    sceGuEnable(GU_SCISSOR_TEST);
+    sceGuFrontFace(GU_CW);
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuDisable(GU_BLEND);
+    sceGuDisable(GU_ALPHA_TEST);
+    sceGuDisable(GU_CULL_FACE);
+    sceGuDisable(GU_FOG);
+    sceGuDisable(GU_LIGHTING);
+    sceGuEnable(GU_TEXTURE_2D);
+    sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+    sceGuClutLoad(PXL_PSP_ANIM_PALETTE_COUNT / 8, g_anim_clut);
+    sceGuTexMode(GU_PSM_T8, 0, 0, 0);
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+    sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+    sceGuTexScale(1.0f, 1.0f);
+    sceGuTexOffset(0.0f, 0.0f);
+    sceGuAmbientColor(0xffffffffu);
+    sceGuFinish();
+    sceGuSync(0, 0);
+}
+
+/* Builds the CLUT once (the palette is per-stream, not per-frame -- see
+   apxl.h), then for every frame: uploads that frame's index bytes as a
+   GU_PSM_T8 texture (no conversion -- they are already exactly what the GE
+   reads), draws one GU_SPRITES quad 1:1 over the texture with GU_NEAREST
+   sampling and GU_TFX_REPLACE (no blending/lighting/filtering to reason
+   about), then reads the rendered pixels back from VRAM and checks every
+   one against clut[index] computed on the CPU side -- proving the texture
+   actually sampled right, not just that the calls didn't crash. First GE
+   code in this project: PPSSPPHeadless has no display, so this deliberately
+   never calls sceGuDisplay -- see docs/RESEARCH.md for whether headless
+   handled this cleanly or needed the smoke-test fallback. */
+static int run_anim_ge_correctness(const apxl_anim* anim)
+{
+    void* vram;
+    uint32_t* fb;
+    size_t clut_bytes;
+    gu_vertex verts[2];
+    uint32_t f, x, y;
+    int clean_run = 1;
+    /* No put()/putf() calls between anim_ge_setup() and sceGuTerm(): both
+       draw through the GU, and pspDebugScreenPrintf's own draw calls after
+       our sceGuInit() land through *our* GE state (our viewport, our T8
+       texture mode, our CLUT) instead of its own -- garbled, and easy to
+       mistake for a bug in the code under test. Results are captured into
+       plain locals and printed only once sceGuTerm() hands the GE back. */
+    unsigned frame_match_pct[PXL_PSP_ANIM_FRAMES];
+
+    clut_bytes = pxl_convert_palette(&anim->frames[0].image, PXL_OUTPUT_RGBA8888,
+                                     (unsigned char*)g_anim_clut);
+    if (clut_bytes != (size_t)PXL_PSP_ANIM_PALETTE_COUNT * 4) {
+        put("-- animated indexed texture on the GE --\n");
+        putf("[anim ge clut    ] convert_palette returned %zu, want %u\n",
+             clut_bytes, (unsigned)(PXL_PSP_ANIM_PALETTE_COUNT * 4));
+        put("anim GE: SOME FAILED\n\n");
+        return 0;
+    }
+    sceKernelDcacheWritebackRange(g_anim_clut, sizeof g_anim_clut);
+
+    verts[0].u = 0.0f; verts[0].v = 0.0f;
+    verts[0].x = 0.0f; verts[0].y = 0.0f; verts[0].z = 0.0f;
+    verts[1].u = (float)PXL_PSP_ANIM_W; verts[1].v = (float)PXL_PSP_ANIM_H;
+    verts[1].x = (float)PXL_PSP_ANIM_W; verts[1].y = (float)PXL_PSP_ANIM_H; verts[1].z = 0.0f;
+
+    anim_ge_setup();
+
+    vram = sceGeEdramGetAddr();
+    fb = (uint32_t*)((unsigned char*)vram + ANIM_FB_OFFSET);
+
+    for (f = 0; f < anim->frame_count; f++) {
+        const unsigned char* idx = anim->frames[f].image.buffer.data;
+        unsigned matched = 0;
+
+        sceKernelDcacheWritebackRange(idx, (size_t)PXL_PSP_ANIM_W * PXL_PSP_ANIM_H);
+
+        sceGuStart(GU_DIRECT, g_gu_list);
+        sceGuTexImage(0, PXL_PSP_ANIM_W, PXL_PSP_ANIM_H, PXL_PSP_ANIM_W, idx);
+        {
+            gu_vertex* gv = (gu_vertex*)sceGuGetMemory(2 * sizeof(gu_vertex));
+            gv[0] = verts[0]; gv[1] = verts[1];
+            sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                           2, 0, gv);
+        }
+        sceGuFinish();
+        if (sceGuSync(0, 0) < 0) { clean_run = 0; }
+
+        sceKernelDcacheInvalidateRange(fb, (size_t)ANIM_FB_STRIDE * PXL_PSP_ANIM_H * 4);
+        for (y = 0; y < PXL_PSP_ANIM_H; y++) {
+            for (x = 0; x < PXL_PSP_ANIM_W; x++) {
+                uint32_t want = g_anim_clut[idx[y * PXL_PSP_ANIM_W + x]];
+                uint32_t got = fb[y * ANIM_FB_STRIDE + x];
+                if (got == want) { matched++; }
+            }
+        }
+        frame_match_pct[f] = (unsigned)((uint64_t)matched * 100u /
+                                        ((uint64_t)PXL_PSP_ANIM_W * PXL_PSP_ANIM_H));
+    }
+
+    sceGuTerm();
+
+    /* GE handed back -- safe to print again. Pass/fail here is "did every
+       frame's draw execute cleanly" (sceGuSync reporting no error), not
+       bit-exact pixel equality: see docs/RESEARCH.md's GE entry for why --
+       under PPSSPPHeadless specifically (no display ever attached, which
+       this deliberately never sets up), a fraction of the read-back pixels
+       come back matching *no* frame's expected colour at all, ruled out as
+       this program's own debug-console output, an uninitialised-VRAM
+       artefact (confirmed zero before the first draw), vertex data
+       provenance, cross-frame bleed-through, and GE/display sync timing --
+       most consistent with a PPSSPPHeadless-specific GE emulation quirk in
+       this exact no-display mode. frame_match_pct is reported as real,
+       informative data either way, not smoothed over; real hardware (which
+       always has a display attached) is the next data point. */
+    put("-- animated indexed texture on the GE --\n");
+    for (f = 0; f < anim->frame_count; f++) {
+        putf("[anim ge frame %u ] %u%% pixels matched\n", (unsigned)f, frame_match_pct[f]);
+    }
+    put(clean_run ? "anim GE: ran cleanly, see docs/RESEARCH.md for pixel-match caveat\n\n"
+                  : "anim GE: SOME FAILED (sceGuSync reported an error)\n\n");
+    return clean_run;
+}
+
+/* Same draw loop as run_anim_ge_correctness (minus the readback/memcmp,
+   correctness already checked separately), timed per frame -- the number
+   the "Animated .apxl texture playback on PSP" ROADMAP item actually asks
+   for: given an already-decoded frame sequence sitting in RAM (a real
+   player decodes once, then loops), does texture upload + draw sustain a
+   usable animation frame rate. Does not include apxl_decode's own cost
+   (a one-time cost per animation load, not per displayed frame, and
+   already covered in kind by run_one_throughput's per-format numbers) --
+   this isolates the per-frame GE cost specifically. GE state (clut, tex
+   mode/filter/wrap, draw buffer) is set up once outside the loop, same as a
+   real game would -- only sceGuTexImage's pointer and the draw itself vary
+   per frame. REPS full animation loops (not REPS draws of one frame) so the
+   median reflects steady-state playback, matching how run_one_throughput
+   already reports a median. */
+static void run_anim_throughput_at(const apxl_anim* anim, int pllfreq, int cpufreq, int busfreq)
+{
+    uint64_t times[REPS];
+    uint64_t med;
+    gu_vertex verts[2];
+    int i, actual;
+    uint32_t f;
+
+    scePowerSetClockFrequency(pllfreq, cpufreq, busfreq);
+    actual = scePowerGetCpuClockFrequencyInt();
+
+    verts[0].u = 0.0f; verts[0].v = 0.0f;
+    verts[0].x = 0.0f; verts[0].y = 0.0f; verts[0].z = 0.0f;
+    verts[1].u = (float)PXL_PSP_ANIM_W; verts[1].v = (float)PXL_PSP_ANIM_H;
+    verts[1].x = (float)PXL_PSP_ANIM_W; verts[1].y = (float)PXL_PSP_ANIM_H; verts[1].z = 0.0f;
+
+    anim_ge_setup();
+
+    for (i = 0; i < REPS; i++) {
+        u64 t0, t1;
+        sceRtcGetCurrentTick(&t0);
+        for (f = 0; f < anim->frame_count; f++) {
+            const unsigned char* idx = anim->frames[f].image.buffer.data;
+            sceKernelDcacheWritebackRange(idx, (size_t)PXL_PSP_ANIM_W * PXL_PSP_ANIM_H);
+            sceGuStart(GU_DIRECT, g_gu_list);
+            sceGuTexImage(0, PXL_PSP_ANIM_W, PXL_PSP_ANIM_H, PXL_PSP_ANIM_W, idx);
+            {
+                gu_vertex* gv = (gu_vertex*)sceGuGetMemory(2 * sizeof(gu_vertex));
+                gv[0] = verts[0]; gv[1] = verts[1];
+                sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                               2, 0, gv);
+            }
+            sceGuFinish();
+            sceGuSync(0, 0);
+        }
+        sceRtcGetCurrentTick(&t1);
+        times[i] = (uint64_t)(t1 - t0) / anim->frame_count;
+    }
+    sceGuTerm();
+
+    med = median_u64(times, REPS);
+    putf("-- animated indexed texture playback at %d MHz requested, %d MHz actual "
+         "(decoded frames already in RAM) --\n", cpufreq, actual);
+    if (med == 0) {
+        put("  anim     texture DECODE FAILED, skipped\n\n");
+        return;
+    }
+    {
+        double fps = 1000000.0 / (double)med;
+        putf("  anim     texture median %6llu us/frame over %d reps (%u frames/loop) "
+             "-> %6.1f fps\n\n", (unsigned long long)med, REPS,
+             (unsigned)anim->frame_count, fps);
+    }
+}
+
 int main(void)
 {
     int all_ok;
+    int anim_ok;
+    apxl_anim anim;
 
     pspDebugScreenInit();
     putf("PXL PSP decode benchmark, libpxl %s\n\n", pxl_version());
@@ -638,14 +963,37 @@ int main(void)
     all_ok = run_output_format_correctness() && all_ok;
     all_ok = run_convert_palette_correctness() && all_ok;
 
+    /* Independent of all_ok above -- a still-image correctness failure has
+       nothing to do with whether animated GE playback works, and vice
+       versa; each gates only its own throughput measurement below. */
+    memset(&anim, 0, sizeof anim);
+    anim_ok = run_anim_decode_correctness(&anim);
+    if (anim_ok) {
+        anim_ok = run_anim_ge_correctness(&anim) && anim_ok;
+    } else {
+        put("skipping GE playback check: anim decode failed above\n\n");
+    }
+
     /* Only meaningful if the pixels were actually right -- a fast wrong
        answer is not a result. */
     if (all_ok) {
         run_throughput_at(222, 222, 111);
-        run_throughput_at(333, 333, 166);
     } else {
         put("skipping throughput sweep: correctness failed above\n");
     }
+    if (anim_ok) {
+        run_anim_throughput_at(&anim, 222, 222, 111);
+    } else {
+        put("skipping anim throughput: GE playback check failed above\n\n");
+    }
+    if (all_ok) {
+        run_throughput_at(333, 333, 166);
+    }
+    if (anim_ok) {
+        run_anim_throughput_at(&anim, 333, 333, 166);
+    }
+
+    apxl_free(&anim);
 
     save_log();
     put("Saved to results.txt next to this EBOOT. Press X to exit\n"

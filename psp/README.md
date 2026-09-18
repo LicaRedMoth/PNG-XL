@@ -26,6 +26,19 @@ real hardware" entry: decoding straight to RGB565 costs 37.7-43.5% more
 decode time than a plain `pxl_decode()`, but still reconstructs pixels
 roughly 2x faster than libpng's plain RGBA8888 decode on the same hardware.
 
+**Added 2026-09-18, headless-verified, real-hardware confirmation still
+needed**: an embedded 8-frame indexed `.apxl` animation, decoded via
+`apxl_decode` (bit-exact under `PPSSPPHeadless`) and pushed through the
+first `sceGu*` code in this project — `GU_PSM_T8` texture + one CLUT per
+stream, per `ROADMAP.md`'s "Animated indexed `.apxl` texture playback on
+PSP". The GE call sequence itself runs cleanly (no hang, no error) at both
+clocks, but `PPSSPPHeadless`'s off-screen pixel read-back does not confirm
+bit-exact output for a reason investigated but not identified — see
+`RESEARCH.md`'s entry with the same name for the full investigation. The
+program reports the real per-frame pixel-match percentage rather than
+hiding the gap; treat it as unconfirmed until run on real hardware, the same
+as every throughput number below.
+
 ## One-time setup
 
 Needs the [pspdev](https://github.com/pspdev/pspdev) toolchain — not packaged

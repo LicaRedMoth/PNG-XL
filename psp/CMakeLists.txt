@@ -13,9 +13,11 @@ set(ZSTD_LIB ${PXL_ROOT}/vendor/zstd/lib)
 # pulls in the zstd compressor, which a decode-only target has no use for.
 add_executable(pxl_psp_bench
     main.c
+    apxl_encode_stubs.c
     ${PXL_ROOT}/src/pxl_codec_common.c
     ${PXL_ROOT}/src/pxl_codec_decode.c
     ${PXL_ROOT}/src/pxl_io.c
+    ${PXL_ROOT}/src/apxl_codec.c
     ${ZSTD_LIB}/common/debug.c
     ${ZSTD_LIB}/common/entropy_common.c
     ${ZSTD_LIB}/common/error_private.c
@@ -41,12 +43,14 @@ target_compile_definitions(pxl_psp_bench PRIVATE
     ZSTD_DISABLE_ASM=1 ZSTD_LEGACY_SUPPORT=0 ZSTD_MULTITHREAD=0)
 # psp-gcc's own specs already link the base pspuser/pspkernel/libc PSPSDK
 # needs (sceIoWrite/sceRtcGetCurrentTick/sceKernelExitGame live there); these
-# three are the on-screen, pad-reading and clock/power calls main.c adds
-# beyond that; pspge/pspdisplay are pspdebug's own dependencies (it draws
-# through the GU), not something main.c calls directly.
+# are the on-screen, pad-reading, clock/power and GE calls main.c adds beyond
+# that. pspgu is new as of the animated-texture-playback work (2026-09-18,
+# first sceGu* calls in this project) -- pspge/pspdisplay were already linked
+# as pspdebug's own dependencies (it draws through the GU too), but nothing
+# called into pspgu directly before this.
 # png16/z: the libpng baseline main.c decodes against for comparison -- a
 # pspdev portlib, not something this project vendors or builds.
-target_link_libraries(pxl_psp_bench PRIVATE pspdebug pspctrl pspge pspdisplay psppower png16 z)
+target_link_libraries(pxl_psp_bench PRIVATE pspdebug pspctrl pspge pspgu pspdisplay psppower png16 z)
 
 create_pbp_file(
     TARGET pxl_psp_bench

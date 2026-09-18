@@ -29,4 +29,34 @@ static void pxl_psp_pattern_pixel(uint32_t x, uint32_t y, uint8_t out[4])
     out[3] = 255;
 }
 
+/* Animated indexed test content (added for the "Animated .apxl texture
+   playback on PSP" / "PSP/GE path" ROADMAP items): a fixed, hand-picked
+   16-colour palette and a deterministic per-frame index formula, shared
+   between bench/mkpsptest.c (which builds the embedded indexed .apxl from
+   it) and psp/main.c (which re-derives the same expected index bytes and
+   palette to check a decode against -- same "formula, not data" reasoning
+   as pxl_psp_pattern_pixel above). Deliberately palette-friendly (16 flat
+   colours, an 8px block pattern) rather than reusing the gradient pattern
+   above, which has far more than 256 unique colours -- this is meant to
+   read like a small scrolling UI/sprite animation, the content class the
+   2026-09-18 indexed-animation corpus measurement found zero misses on. */
+#define PXL_PSP_ANIM_PALETTE_COUNT 16
+#define PXL_PSP_ANIM_W 64
+#define PXL_PSP_ANIM_H 64
+#define PXL_PSP_ANIM_FRAMES 8
+
+static const uint8_t pxl_psp_anim_palette[PXL_PSP_ANIM_PALETTE_COUNT][4] = {
+    { 220,  20,  60, 255 }, {  30, 144, 255, 255 }, {  50, 205,  50, 255 },
+    { 255, 215,   0, 255 }, { 148,   0, 211, 255 }, { 255, 140,   0, 255 },
+    {  64, 224, 208, 255 }, { 255,  20, 147, 255 }, { 139,  69,  19, 255 },
+    { 105, 105, 105, 255 }, { 240, 230, 140, 255 }, {   0, 100,   0, 255 },
+    { 176, 196, 222, 255 }, { 178,  34,  34, 255 }, {  70, 130, 180, 255 },
+    { 245, 245, 245, 255 }
+};
+
+static uint8_t pxl_psp_anim_index(uint32_t x, uint32_t y, uint32_t frame)
+{
+    return (uint8_t)(((x / 8) + (y / 8) + frame) % PXL_PSP_ANIM_PALETTE_COUNT);
+}
+
 #endif

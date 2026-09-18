@@ -54,6 +54,7 @@
 */
 
 #include "../src/pxl_codec_encode.c"
+#include "../src/apxl_codec.c"
 #include "../psp/pattern.h"
 
 #include <png.h>
@@ -243,6 +244,80 @@ static uint8_t* make_pattern(uint32_t w, uint32_t h)
     return raw;
 }
 
+/* Builds the embedded animated .apxl for the "Animated .apxl texture
+   playback on PSP" / "PSP/GE path" ROADMAP items: PXL_PSP_ANIM_FRAMES
+   indexed frames, PXL_PSP_ANIM_W x PXL_PSP_ANIM_H, from pattern.h's
+   pxl_psp_anim_index()/pxl_psp_anim_palette -- hand-built directly (one
+   pxl_image per frame, all sharing the one fixed palette) rather than via
+   apxl_anim_try_index, since the point here is testing apxl_decode and the
+   GE path on real MIPS, not re-testing the auto-palette builder (already
+   covered by tests/roundtrip.c on host). Palette has no alpha buffer (every
+   entry is opaque), exercising pxl_convert_palette's "no alpha" default the
+   same way tests/roundtrip.c's check_convert_palette already does on host. */
+static pxl_buffer make_anim_apxl(void)
+{
+    apxl_anim a;
+    pxl_buffer enc;
+    uint32_t f, x, y;
+    size_t frame_bytes = (size_t)PXL_PSP_ANIM_W * PXL_PSP_ANIM_H;
+    uint8_t pal_rgb[PXL_PSP_ANIM_PALETTE_COUNT * 3];
+
+    for (f = 0; f < PXL_PSP_ANIM_PALETTE_COUNT; f++) {
+        pal_rgb[f * 3 + 0] = pxl_psp_anim_palette[f][0];
+        pal_rgb[f * 3 + 1] = pxl_psp_anim_palette[f][1];
+        pal_rgb[f * 3 + 2] = pxl_psp_anim_palette[f][2];
+    }
+
+    memset(&a, 0, sizeof a);
+    a.frames = (apxl_frame*)calloc(PXL_PSP_ANIM_FRAMES, sizeof(apxl_frame));
+    if (!a.frames) {
+        pxl_buffer none = { NULL, 0 };
+        return none;
+    }
+    a.frame_count = PXL_PSP_ANIM_FRAMES;
+    a.loop_count = 0; /* infinite */
+    a.canvas_w = PXL_PSP_ANIM_W;
+    a.canvas_h = PXL_PSP_ANIM_H;
+    a.channels = 1;
+    a.bytes_per_channel = 1;
+
+    for (f = 0; f < PXL_PSP_ANIM_FRAMES; f++) {
+        uint8_t* buf = (uint8_t*)malloc(frame_bytes);
+        if (!buf) {
+            pxl_buffer none = { NULL, 0 };
+            for (y = 0; y < f; y++) { free(a.frames[y].image.buffer.data); }
+            free(a.frames);
+            return none;
+        }
+        for (y = 0; y < PXL_PSP_ANIM_H; y++) {
+            for (x = 0; x < PXL_PSP_ANIM_W; x++) {
+                buf[y * PXL_PSP_ANIM_W + x] = pxl_psp_anim_index(x, y, f);
+            }
+        }
+        a.frames[f].image.buffer.data = buf;
+        a.frames[f].image.buffer.size = frame_bytes;
+        a.frames[f].image.width = PXL_PSP_ANIM_W;
+        a.frames[f].image.height = PXL_PSP_ANIM_H;
+        a.frames[f].image.channels = 1;
+        a.frames[f].image.bytes_per_channel = 1;
+        /* Static storage, freed only once below via pal_rgb going out of
+           scope -- every frame's palette.data points at the same bytes, as
+           apxl_encode requires. */
+        a.frames[f].image.palette.data = pal_rgb;
+        a.frames[f].image.palette.size = sizeof pal_rgb;
+        a.frames[f].delay_num = 1;
+        a.frames[f].delay_den = 12; /* 12 fps, an ordinary UI-animation rate */
+    }
+
+    enc = apxl_encode(&a, APXL_LEVEL_DEFAULT);
+
+    for (f = 0; f < PXL_PSP_ANIM_FRAMES; f++) {
+        free(a.frames[f].image.buffer.data);
+    }
+    free(a.frames);
+    return enc;
+}
+
 int main(void)
 {
     static const struct { const char* name; uint8_t filter; } filters[] = {
@@ -314,6 +389,20 @@ int main(void)
             free(enc.data);
         }
         free(raw);
+    }
+
+    {
+        pxl_buffer anim = make_anim_apxl();
+        if (!anim.data) {
+            fprintf(stderr, "error: building embedded animated .apxl failed\n");
+            return 1;
+        }
+        fprintf(stderr, "anim     %ux%u, %u frames, %u-colour palette -> %zu APXL bytes\n",
+                (unsigned)PXL_PSP_ANIM_W, (unsigned)PXL_PSP_ANIM_H,
+                (unsigned)PXL_PSP_ANIM_FRAMES, (unsigned)PXL_PSP_ANIM_PALETTE_COUNT,
+                anim.size);
+        emit_array("pxl_psp_anim_file", anim.data, anim.size);
+        free(anim.data);
     }
 
     printf("#endif\n");

@@ -1479,3 +1479,135 @@ blowup, and not a single one paired with a sanitizer report.
 item for where this leaves the feature as a whole (PSP/GE playback and
 `apng_load`'s general fuzz coverage are the remaining open pieces, unrelated
 to GIF decoding itself).
+
+### Animated indexed `.apxl` on the PSP GE: first `sceGu*` code in this project, and what headless can't confirm
+
+**Why built.** The two remaining pieces the indexed-`.apxl` decision opened
+(`ROADMAP.md`'s "PSP/GE path" and "Animated `.apxl` texture playback on
+PSP") are really one piece of work: decode a `.apxl` frame sequence and
+drive `sceGuDrawArray` with it. Scoped to the indexed case specifically
+(`GU_PSM_T8` + one CLUT per stream, via `pxl_convert_palette`) since that's
+what the corpus measurement says the real target content (UI icons,
+throbbers) actually is. `psp/main.c` gained a small embedded 64×64/8-frame
+indexed animation (`bench/mkpsptest.c`'s `make_anim_apxl`, a fixed
+16-colour palette and a coarse block-index formula in `psp/pattern.h`,
+matching the existing still-image "formula, not data" discipline), decoded
+via `apxl_decode` (newly cross-compiled for this target — `src/apxl_codec.c`
+was decode-only source before) and pushed through `sceGuInit` →
+per-frame `sceGuTexImage`/`sceGuDrawArray` → `sceGuTerm`.
+
+**Decode correctness: clean.** `apxl_decode`'s indexed multi-frame path —
+the actually-new PXL/APXL code here, everything downstream of it is either
+already-verified library code (`pxl_convert_palette`) or GE plumbing — is
+bit-exact on real MIPS under `PPSSPPHeadless`: all 8 frames' index bytes and
+the shared 16-entry palette match `pattern.h`'s formula exactly.
+
+**A real bug found and fixed: `GU_TRANSFORM_2D` still needs a viewport.**
+The first attempt used no `sceGuOffset`/`sceGuViewport`/`sceGuScissor` calls
+at all, reasoning that "coordinate passed directly to the rasterizer" (the
+GU header's own description of `GU_TRANSFORM_2D`) meant the separate
+viewport/clip stage didn't apply. Wrong, checked against
+`psp/sdk/samples/gu/clut/clut.c` (a real, working reference in the pspdev
+toolchain, doing exactly this: an indexed `GU_SPRITES` quad) — it sets all
+three even though its sprite is drawn with `GU_TRANSFORM_2D` too.
+`GU_TRANSFORM_2D` only skips the vertex *transform matrix*; the clip stage
+is separate and defaults to a degenerate region. Without it, every draw
+rasterized to roughly one pixel; with `sceGuOffset(2048-W/2, 2048-H/2)` +
+`sceGuViewport(2048,2048,W,H)` + `sceGuScissor(0,0,W,H)` matching the
+reference's pattern, the full W×H quad rasterizes.
+
+**A second real finding, useful beyond this one test: offset 0 is not free
+VRAM scratch space.** The read-back target was first placed at VRAM offset
+0, the address every `pspgu` sample uses for its *display* buffer
+(`sceGuDrawBuffer(...,(void*)0,...)`) — and also, it turns out, where
+`pspDebugScreenInit`'s own text console lives. `put()`/`putf()` (this
+program's logging, called constantly) draw through the GU via
+`pspDebugScreenPrintf`, and once this code's own `sceGuInit()` replaces the
+GE context, that console's drawing gets funneled through *this* code's
+altered state (its tiny viewport, its `T8` texture mode, its CLUT) instead
+of its own — output that looks exactly like a rendering bug, not a logging
+collision, until traced to it. Two independent fixes followed from this:
+moving the read-back target to `ANIM_FB_STRIDE * 272 * 4` bytes into VRAM
+(a full screen-buffer's width past offset 0, the same "second buffer" offset
+real double-buffered code uses), and moving every diagnostic print to *after*
+`sceGuTerm()` hands the GE back, never interleaved with GE-active code.
+
+**What's still unresolved: PPSSPPHeadless does not read back bit-exact
+pixels from this off-screen target, for a reason not fully identified.**
+After both fixes above, per-frame read-back still shows 0% of pixels
+matching `clut[index]` — not corruption *resembling* something explicable,
+just disagreement. Investigated systematically rather than assumed:
+- **Not an ambient/background writer**: the target reads back as exactly the
+  poison pattern written into it, with zero deviation, immediately before
+  the first draw call of the run.
+- **Not vertex data provenance**: switching from a plain stack array (with
+  manual `sceKernelDcacheWritebackRange`) to `sceGuGetMemory`-allocated
+  vertices (matching the reference sample exactly) produced a bit-identical
+  result.
+- **Not cross-frame bleed-through**: of the wrong pixels sampled in one
+  investigation pass, the large majority matched *no* frame's expected
+  colour at that position, ruling out a later frame's draw landing where an
+  earlier frame's read-back was expected.
+- **Not GE/CPU sync timing** in any simple sense: inserting an explicit
+  delay or `sceDisplayWaitVblankStart` between frames changed *which* pixels
+  disagreed without making the read-back agree.
+- **Is timing-sensitive**: the exact disagreement pattern did shift under
+  those last two changes, which is real evidence *something* about this
+  target's timing matters — just not evidence that points at a fix.
+
+Best explanation given all of the above: something specific to
+`PPSSPPHeadless`'s GE emulation when no display is ever attached (this
+deliberately never calls `sceGuDisplay`, since the point was checking GE
+output by reading memory, not by a screenshot) — plausible since every
+`pspgu` sample this was checked against always sets up and shows a real
+display buffer, an untested code path this is the first to exercise in this
+project. Not confirmed, because confirming it would need instrumenting
+PPSSPP itself, out of scope here.
+
+**Decision: ship the GE code, don't claim more than headless can support.**
+`run_anim_ge_correctness` (`psp/main.c`) reports the real per-frame match
+percentage as data, and gates its own pass/fail on `sceGuSync` completing
+without error across all 8 frames (a real, if weaker, signal: the calls are
+accepted and the run completes rather than hanging or erroring) — not on
+pixel equality, since this investigation could not make that reliable under
+headless specifically. The viewport/scissor fix and the VRAM-offset lesson
+are both real and apply regardless. Bit-exact confirmation is deferred to
+real hardware, which always has a display attached and is the next step per
+`psp/README.md`'s two-stage pattern (headless for correctness-shaped
+smoke-testing, hardware for the number and the final pixel check).
+
+### The PSP GE's 16-bit colour formats are B-then-R, not R-then-B — reported from a sibling project's real hardware, not yet independently reproduced here
+
+**Not this project's own measurement.** Flagged 2026-09-18 by the parallel
+session working the Mogeko Castle PSP port (a separate codebase — this
+entry documents the finding for this project's own benefit, since PXL ships
+code that packs pixels for the same GE, not because that project's results
+belong here): rendering an image on real PSP-3008 hardware came out with
+red and blue swapped, traced to the GE's `GU_PSM_5650`/`GU_PSM_5551`/
+`GU_PSM_4444` formats actually being bit-laid-out blue-first (`B5G6R5`,
+`B5G5R5A1`, ...), not red-first (`R5G6B5`, ...) the way `pspgu.h`'s own doc
+comments name them (`GU_COLOR_5650 - 16-bit color (R5G6B5A0)`) and the way
+every PSP homebrew reference this project has read assumes.
+
+**Why this project cares.** `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/
+`RGBA5551` row conversion and `pxl_convert_palette` (`src/pxl_codec_*.c`)
+both pack red into the top bits, matching the SDK-documented, conventional
+layout — the same layout `psp/main.c`'s `expected_565`/`expected_5551` cross
+-checks were written against. `psp/README.md` already claims this "matched
+on the PSP-3008" (2026-09-18) — that claim is still true as far as it goes,
+but it only checked that the MIPS build's packing is *internally
+consistent* (same bytes as the x86 reference formula), never that those
+bytes, once hardware-sampled by the GE and actually displayed, show the
+colours a caller intended. If the channel-order finding above holds, PXL's
+current RGB565/RGBA5551/RGBA4444 output is silently red/blue-swapped
+whenever the GE samples and displays it — a real, if invisible-until-now,
+gap between "verified" and "correct."
+
+**Not acted on yet.** Per explicit instruction: no format change. `.pxl`'s
+packed-format bytes stay red-first — changing that would be a breaking
+container change on the strength of one secondhand report, exactly the kind
+of thing this project's whole discipline exists to avoid. What *should*
+happen before this is trusted further: reproduce it independently, on this
+project's own test content, on real PSP-3008 hardware, the same "measured,
+not assumed" way every other claim here is checked — the still-open item is
+in `ROADMAP.md`'s Held section.

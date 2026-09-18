@@ -182,12 +182,12 @@ path is not.
     (transparent), not ffmpeg's; this is why 3 of the 66 corpus files "fail"
     against an ffmpeg reference despite being correct.
 
+**In progress — PSP/GE path.** See "Animated `.apxl` texture playback on
+PSP" below: built 2026-09-18, headless-verified for decode correctness and
+clean GE execution, real-hardware pixel confirmation still pending.
+
 **Not done — still open:**
 
-- **PSP/GE path:** `pxl_convert_palette`/`GU_PSM_T4`/`T8` are still only
-  wired up for still `.pxl` textures; nothing yet takes a decoded indexed
-  `.apxl` frame sequence to a GE-native animated texture the way the "Animated
-  `.apxl` texture playback on PSP" item below describes for RGBA.
 - **`apng_load` fuzz coverage**, per the safety note above.
 
 ### Real charts: texture load pipeline, PXL vs PNG, init to use, plus weight
@@ -210,20 +210,45 @@ its blockers may now be gone rather than because the scope changed:
   the requirements "Plot the benchmarks" already states below. Neither chart
   exists yet; both are currently tables only.
 
-### Animated `.apxl` texture playback on PSP — not started
+### Animated indexed `.apxl` texture playback on PSP — built, headless-verified, real hardware pending
 
-Nothing in `psp/main.c` decodes more than a single still frame. Every
-correctness and throughput row measured so far (smoke/screen/texture, all
-four filters, `strm565`, `convert_palette`) is a static image — no `.apxl`
-sequence has ever been decoded on this target, headless or real. The piece
-an animated texture would reuse per frame, `pxl_stream_new_ex`'s row-to-
-RGB565/RGBA5551 conversion, already exists (2026-09-18) and is verified for
-a single frame; nobody has chained it across frames, uploaded successive
-textures to VRAM, or driven `sceGuDrawArray` with the result. This is new
-work, not a re-verification of something already built: implement it,
-correctness-check under `PPSSPPHeadless` the way the still path was, then
-take real timing once that passes — the same two-stage pattern
-`psp/README.md` already uses for everything else on this target.
+Scoped to the indexed case (`GU_PSM_T8` + one CLUT per stream via
+`pxl_convert_palette`), since that's what the 2026-09-18 corpus measurement
+says the actual target content (UI icons, throbbers) is — see
+`RESEARCH.md`'s "Animated indexed `.apxl` on the PSP GE" entry for the full
+account. First `sceGu*` code in this project.
+
+**Done:** `src/apxl_codec.c` cross-compiled for this target (decode-only,
+via a link-time stub for the zstd compressor symbols `apxl_encode` alone
+needs — `psp/apxl_encode_stubs.c`); a small embedded 64×64/8-frame indexed
+test animation (`bench/mkpsptest.c`'s `make_anim_apxl`); `apxl_decode` on
+real MIPS verified bit-exact against `psp/pattern.h`'s formula (all 8
+frames, the palette); the actual `sceGuInit` → per-frame
+`sceGuTexImage`/`sceGuDrawArray` → `sceGuTerm` sequence runs cleanly under
+`PPSSPPHeadless` (no hang, no error) across all 8 frames at both clocks.
+Found and fixed a real bug along the way: `GU_TRANSFORM_2D` still needs
+`sceGuOffset`/`sceGuViewport`/`sceGuScissor` (it only skips the vertex
+*transform matrix*, not the separate clip stage) — every draw rasterized to
+~1 pixel without them.
+
+**Not done / not confirmed:** bit-exact pixel readback. `PPSSPPHeadless`'s
+off-screen render target reads back 0% matching `clut[index]` after the fix
+above, for a reason investigated at length but not identified — ruled out:
+this program's own debug-console output landing through the altered GE
+state (real, fixed, but not sufficient alone), an uninitialised-VRAM
+artefact, vertex data provenance, cross-frame bleed-through. Most
+consistent with a `PPSSPPHeadless`-specific GE-emulation gap when no
+display is ever attached (never tested by any reference sample, all of
+which always show a real display buffer). `run_anim_ge_correctness`
+(`psp/main.c`) reports the real match percentage as data rather than
+hiding it, and gates pass/fail on clean execution instead of pixel
+equality, since this investigation could not make pixel equality reliable
+under headless specifically. Real hardware (always has a display attached)
+is the next data point — same two-stage pattern `psp/README.md` already
+uses for everything else on this target. Throughput numbers exist in the
+program's output already but, like every other headless timing on this
+target, are the emulator's own model, not Allegrex — real numbers still
+needed.
 
 ## Next
 
@@ -514,3 +539,13 @@ Not scheduled, but not forgotten.
   which already produced one phantom bug that cost real time to retract. If the
   suite grows over PngSuite, compare with `magick compare -metric AE` or against
   decoded RGBA bytes.
+- **Verify the PSP GE's 565/5551/4444 channel order independently.** A
+  sibling project (the Mogeko Castle PSP port) reported 2026-09-18 that
+  rendering on real PSP-3008 hardware came out red/blue-swapped, tracing it
+  to the GE's packed colour formats being `B`-first, not `R`-first the way
+  `pspgu.h`'s own doc comments and this project's `pxl_stream_new_ex`/
+  `pxl_convert_palette` both assume — see `RESEARCH.md`'s entry with the
+  same name. Secondhand, not yet reproduced on this project's own test
+  content on real hardware; not acted on (no format change) until it is.
+  Held rather than Now because reproducing it needs the PSP-3008 hardware
+  window, same constraint every other real-hardware entry here has had.
