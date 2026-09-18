@@ -28,6 +28,23 @@ APNG chunk parser for real: `apng_load` has to honor dispose/blend ops,
 per-frame offsets and sub-rectangles, none of which the synthetic full-canvas
 frames in `check_anim` ever produce.
 
+### LittleRunner.gif
+
+- 32×32, 6 frames, global colour table (4 entries), `NETSCAPE2.0` infinite-loop
+  extension.
+- Source: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:LittleRunner.gif),
+  by Sudden, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) —
+  attribution required if this file is ever redistributed rather than only
+  used to run the test suite.
+
+Used by the `gif_real` case: `gif_load` (native GIF decode, `src/gif.c`) on a
+real downloaded file, then the full `apxl_anim_try_index` -> `apxl_encode` ->
+`apxl_decode` -> `apng_save` -> `apng_load` round trip, checked lossless.
+`check_gif` in the same file covers what this one small real GIF isn't
+guaranteed to exercise — BACKGROUND/PREVIOUS disposal and transparency — on a
+hand-built fixture instead, the same relationship `check_anim`/`real_apng`
+already have on the APNG side.
+
 ## Encoded references
 
 `RGB_24bits_palette_color_test_chart.pxl` and

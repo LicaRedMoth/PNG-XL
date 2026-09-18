@@ -1204,6 +1204,125 @@ or 311 456 `.text` figures, and none of these three has gone through the
 project's real build pipeline yet. That re-measurement is still worth doing
 properly; it should no longer be expected to find a problem.
 
+### Can an RPG Maker VX Ace game's Ruby scripting run fast enough on PSP? Measured, not assumed
+**Raised 2026-09-17**, while scoping a port of *Mogeko Castle* (RPG Maker VX
+Ace, RGSS3/Ruby 1.9.2) to PSP as a real-world consumer of PXL's own stated
+target ("PSP-class, 32 MB RAM, no fast float"). Two structural blockers stood
+between "PXL decodes fast enough" and "the game runs at all": PSP's GE is
+fixed-function only (RGSS's `tone=`/`hue_change` compositing is normally done
+via `mkxp`'s GLSL shaders, which the GE cannot run), and nobody has published
+whether a Ruby-class interpreter is fast enough on a 222 MHz single-core,
+in-order, non-JIT MIPS core to keep up with RGSS3's Fiber-driven event
+interpreter. The renderer question resolved analytically (tone decomposes
+into two ordinary alpha/additive fixed-function passes; hue is normally
+static per sprite and cachable). The interpreter question could not — it
+needed an actual number.
+
+**Method:** cross-compiled `mruby` (not full MRI — mruby was picked as the
+realistic candidate: RGSS3's core event loop is load-bearing on `Fiber`,
+which mruby carries natively, unlike `Marshal`, which mruby lacks entirely)
+for `mipsel-psp-elf` against a prebuilt `pspdev` toolchain, then ran three
+synthetic workloads modeled on patterns read directly out of this game's own
+decrypted `Game_Interpreter`/`Game_CharacterBase`/`Window_Message` scripts
+(RGSS3A decryption and Marshal parsing for `Scripts.rvdata2` were written
+from scratch for this — the format is documented in `mkxp`'s
+`rgssad.cpp` and Ruby's own Marshal spec, no external tool needed). Timed on
+real emulated PSP cycles via **PPSSPP's `-i` interpreter core**, which is
+cycle-counted against a stock 222 MHz Allegrex and is not sped up by a host
+JIT (`-j` would measure the emulator's host speed, not the console's) —
+cross-checked every time against the same script run through a natively
+compiled `mruby` on the (modest, 2011) host CPU, since a slowdown ratio miles
+outside the ~10–20x a 2.2 GHz out-of-order core should have over a 222 MHz
+in-order one would mean the measurement itself was broken, not the result.
+
+| workload | PSP (`-i`, 222 MHz) | host (Pentium B960 @ 2.2 GHz) | ratio |
+|---|---:|---:|---:|
+| sprite/object `update` + command dispatch, per simulated frame | 1.774 ms | ~0.12 ms | ~15x |
+| `Window_Message`-style `gsub`/`sprintf` escape-code processing, per message | 0.638 ms | ~0.046 ms | ~14x |
+| custom binary serialize+deserialize (mruby has no `Marshal`), per round trip of a 1724-byte representative save graph (200 switches, 200 variables, 4-actor party, system flags) | 38.10 ms | ~1.87 ms | ~20x |
+
+All three land in the same 14–20x band, which is what makes the number
+trustworthy rather than a one-off. Against a 16.67 ms/frame budget at 60 fps,
+1.77 ms of scripting overhead leaves roughly 9x headroom before the
+interpreter itself is the bottleneck; 38 ms for a full save-data round trip
+is a one-time action, not a per-frame cost, and stays well inside "instant"
+even at several times this toy structure's size.
+
+**What this does not show:** mruby is not MRI/YARV — its simpler VM is
+almost certainly faster per Ruby op, so this is an optimistic signal for "a
+Ruby-shaped interpreter," not proof that literal RGSS3+MRI hits the same
+number. The workloads are synthetic, modeled on the real scripts rather than
+replaying them. The measurement is the interpreter alone on an idle core; a
+real port shares that one core with GE draw calls, DMA and audio. And
+`mruby`'s missing `Marshal` means a real port needs its own save-file format
+regardless of speed — this benchmark answers "is a hand-rolled one fast
+enough" (yes), not "can we keep the original save format" (no, by
+construction).
+
+**Status: informative, not a decision.** Nothing here lands in PXL's own
+code or format — like the WebP-on-PSP check above, this answers "would the
+premise even survive contact with the hardware" for a downstream project
+that plans to use PXL, not a question about PXL itself. The corpus
+(`Scripts.rvdata2`, decrypted from the game's own `Game.rgss3a`) is the
+user's legally-owned freeware game, not vendored anywhere, per this
+project's usual rule against committing test assets.
+
+### Sizing the Mogeko Castle asset budget: how much of the shared RTP does it actually need?
+**Raised 2026-09-17**, same port-scoping thread as above. The game's own
+`Game.rgss3a` (62.9 MiB) is not its whole asset footprint — `Game.ini`
+declares `RTP=RPGVXAce`, RPG Maker VX Ace's free shared runtime package, and
+any graphic/sound the game references but doesn't bundle itself has to come
+from there. Before crediting PXL with "solving" a memory budget, the budget
+itself needed a real number, not the RTP's full 195 MiB (downloaded from
+`rpgmakerweb.com/run-time-package`, an Inno Setup installer extracted with
+`innoextract` — no execution needed).
+
+**Method:** extended the Marshal reader (built for `Scripts.rvdata2`, see
+above) to walk arbitrary `RPG::*` object graphs generically — every Marshal
+tag (`Object`, `Float`, `Hash`, symbol links, object links) rather than just
+the array-of-triples shape `Scripts.rvdata2` needed — and ran it over all 238
+`Data/*.rvdata2` files pulled from the same `Game.rgss3a`. Any string that
+exactly matches an RTP file's basename, in a category the game doesn't
+already supply itself, is a real addition to the port's budget.
+
+| category | files | size |
+|---|---:|---:|
+| Animations | 93 | 44.82 MiB |
+| Tilesets | 44 | 7.91 MiB |
+| BGM | 3 | 5.52 MiB |
+| SE | 185 | 1.99 MiB |
+| Battlers | 30 | 1.71 MiB |
+| Battlebacks 1+2 | 4 | 0.88 MiB |
+| Faces | 3 | 0.50 MiB |
+| Characters | 9 | 0.30 MiB |
+| ME/BGS | 3 | 0.12 MiB |
+| **total** | **374** | **63.76 MiB** |
+
+**The Animations row is an artefact, caught by cross-checking rather than
+trusting the first number:** 93 of 93 matched files is the *entire* RTP
+`Graphics/Animations` folder, which was the tell — VX Ace's
+`Animations.rvdata2` conventionally keeps the full stock animation list
+regardless of whether anything in the actual game triggers each entry, so
+"referenced somewhere in `Data/`" overcounts for this one category
+specifically. Checked by tracing actual `@animation_id` usage from
+`Skills.rvdata2`/`Items.rvdata2` into `Animations.rvdata2`'s entries: `Items`
+parsed cleanly and uses only **6** of the 93 (`Heal1`–`Heal6`). `Skills`
+(usually the larger source of animation references in a JRPG, since it
+carries combat actions) hit a `RPG::UsableItem::Damage` ivar layout the
+generic walker didn't anticipate and aborted rather than silently return a
+wrong number — not fixed, since this was already a secondary refinement pass
+on top of a defensible upper bound, and the honest partial result already
+makes the point.
+
+**Status: informative, not a decision.** Reliable part of the RTP addition
+(everything except Animations, none of which showed this over-count pattern
+under the same check) is **~19 MiB**. Animations sit somewhere between "a
+handful of files" (consistent with the `Items` sample) and the 44.82 MiB
+ceiling — resolving that gap means fixing the `Skills.rvdata2` parse, not
+re-guessing. Combined with the game's own ~82 MiB (Graphics+Data archive plus
+the loose `Audio` folder), the whole port's unique packed-asset footprint is
+**roughly 100–146 MiB**, not vendored anywhere per this project's usual rule.
+
 ### Indexed `.apxl`: does the one-global-palette design fit real content, and is it worth building?
 
 **Why measured.** `ROADMAP.md`'s "Verify: is `.apxl`/APNG actually finished?"
@@ -1290,5 +1409,73 @@ files (`LittleRunner.gif`, `Cloud.gif`, via GIF → APNG → `-i` → decode →
 `magick compare`): **0 pixels differ**, and `Cloud.gif` lands at 37.6%
 smaller, matching this section's corpus-wide number. See `ROADMAP.md`'s
 "Implement indexed `.apxl`" item for the full account, including what's
-still open (PSP/GE playback, a native GIF front end, `apng_load` fuzz
-coverage).
+still open (PSP/GE playback, `apng_load` fuzz coverage).
+
+### Native GIF front end: built, and a real GIF-semantics ambiguity resolved against browser ground truth
+
+**Why built.** The indexed `.apxl` measurement and implementation above used
+GIF as its corpus but never decoded one directly — verification went through
+ffmpeg's GIF→APNG conversion. That leaves a gap the format is explicitly
+aimed at closing (indexed animation support exists *because* GIF-shaped
+content is common): nothing in this project could take a `.gif` file
+straight in. `src/gif.c` closes it — a hand-rolled GIF87a/89a decoder in
+`pxlcore` (no libpng dependency, deliberately duplicating a small file-read
+helper rather than pulling in `pxl_pngio.h`): variable-width LZW (3-12 bit
+codes, LSB-first packing, prefix-chain dictionary, KwKwK special case),
+4-pass deinterlacing, and dispose-then-draw compositing (GIF disposal
+0/1→NONE, 2→BACKGROUND, 3→PREVIOUS) mirroring `apng_load`'s existing model.
+`pxltool cg` and `tools/pxltool.c`'s `cmd_gif_compress` wire it straight into
+the indexed pipeline: `gif_load` → `apxl_anim_try_index` → `apxl_encode`.
+
+**A real ambiguity, found by testing against a 66-file real corpus, not
+assumed.** GIF89a's spec text advises filling canvas area no frame ever
+covers, and area a `BACKGROUND`-disposal frame clears, with the Logical
+Screen Descriptor's background colour. `gif.c` originally did the simpler
+thing — leave it transparent — which is what "measured, not assumed" caught:
+running the full `bench/gif_corpus.sh` set (66 files) through `gif_load` and
+diffing against ffmpeg's GIF→APNG reference found 3 files disagreeing on
+exactly this area (`Cuve_agitees_300L_500µm`, `Dramazol`, `Ebene_1_interp`).
+Reading the disposal spec text literally and implementing background-colour
+fill instead "fixed" those three — but broke 3 *different* files
+(`Eulerianpath_drawing_without_first_frame`, `FoyerLentilleConvergente`,
+`Implosion_nuclear_weapon_design3`), where frame 0 covers the full canvas
+but *with* an explicitly transparent pixel at the disputed location, and
+ffmpeg still showed alpha=0 there — directly contradicting the "always fill
+with background colour" reading. Two real corpus files, both scored against
+the same reference, wanted opposite answers: the spec text alone could not
+settle this.
+
+**Resolved against actual rendering, not the advisory text or a second
+decoder's interpretation of it.** Served two representative GIFs
+(`Cuve_agitees_300L_500µm`, `FoyerLentilleConvergente`) from a local
+`python3 -m http.server` and read `<canvas>.getImageData()` in Chromium via
+the browser tool at the exact disputed pixel/row in each. Both came back
+fully transparent — `[0,0,0,0]` — for both the "never covered" case and the
+explicit-transparent-pixel case. That makes ffmpeg's GIF decoder the
+non-standard outlier here: it implements GIF89a's advisory background-colour
+text literally, but real-world rendering (what a `.gif` file actually looks
+like to anyone who opens one) does not follow it. `gif.c`'s original,
+simpler transparent-everywhere behaviour was correct; the background-colour
+"fix" was reverted in full.
+
+**Verification.** A hand-built synthetic 4×4/4-colour GIF exercising every
+disposal method (`check_gif`, `tests/roundtrip.c`); a real 6-frame file
+(`LittleRunner.gif`, CC BY-SA 4.0, Wikimedia Commons) end-to-end through
+GIF → `.apxl` → APNG (`check_gif_real`); the full 66-file `bench/gif_corpus.sh`
+batch against ffmpeg: 63/66 exact, the remaining 3 being the resolved
+ffmpeg-divergence above, independently spot-checked pixel-by-pixel (every
+differing pixel is transparent on this side, matching the Chromium-verified
+answer) rather than taken on faith. Fuzzed separately: 26 800 mutations (67
+real-corpus seeds × 400 mutations, 4 strategies — truncation, byte flips,
+length-field corruption, structural insert/delete) against an ASan/UBSan
+build of `gif_load` — **0 crashes**. The fuzzer flagged 169 cases as
+`TIMEOUT` (5s per-case limit); checked rather than dismissed, all 169 trace
+to a small set of large (1.5-7 MB) real-corpus seeds that are simply slow to
+decode *unmutated* under ASan on a loaded machine (`24-cell-3CP.gif`: 6.2s
+under ASan vs 0.8s in a release build) — linear cost, not an algorithmic
+blowup, and not a single one paired with a sanitizer report.
+
+**Decision: ship it as-is.** See `ROADMAP.md`'s "Implement indexed `.apxl`"
+item for where this leaves the feature as a whole (PSP/GE playback and
+`apng_load`'s general fuzz coverage are the remaining open pieces, unrelated
+to GIF decoding itself).

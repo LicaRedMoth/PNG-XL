@@ -11,6 +11,7 @@
 #include "pxl_format.h"
 #include "apxl.h"
 #include "apng.h"
+#include "gif.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -654,6 +655,370 @@ static int check_anim_try_index(void)
         }
         apxl_free(&g);
     }
+    return ok;
+}
+
+/*----------------------------------------------------------------------------
+  GIF (added 2026-09-18, see docs/RESEARCH.md's "Indexed .apxl" entry and
+  src/gif.c)
+----------------------------------------------------------------------------*/
+
+/* Minimal growbuf and GIF-writing helpers, local to this test: gif_load has
+   no symmetric gif_save (this project only ever needs to read GIF), so a
+   hand-built byte stream is the only way to check gif_load against exact
+   known pixels rather than only against real downloaded files. */
+typedef struct { unsigned char* data; size_t size, cap; } gif_test_buf;
+
+static void gtb_put(gif_test_buf* b, const void* src, size_t n)
+{
+    if (b->size + n > b->cap) {
+        size_t ncap = b->cap ? b->cap * 2 : 64;
+        unsigned char* nd;
+        while (ncap < b->size + n) { ncap *= 2; }
+        nd = (unsigned char*)realloc(b->data, ncap);
+        if (!nd) { return; }
+        b->data = nd; b->cap = ncap;
+    }
+    memcpy(b->data + b->size, src, n);
+    b->size += n;
+}
+static void gtb_u8(gif_test_buf* b, unsigned char v) { gtb_put(b, &v, 1); }
+static void gtb_le16(gif_test_buf* b, uint16_t v)
+{
+    unsigned char t[2];
+    t[0] = (unsigned char)(v & 0xFF); t[1] = (unsigned char)(v >> 8);
+    gtb_put(b, t, 2);
+}
+
+/* Encodes `n` index bytes as a valid GIF LZW sub-block stream: Clear, then
+   every pixel as its own root code, never a back-reference. gif_lzw_decode's
+   dictionary bookkeeping happens the same way regardless of whether entries
+   are ever reused, so this is valid (if uncompressed) input -- far simpler
+   to get right by hand than a real compressor, and the point here is
+   correctness of the decoder, not the size of the fixture. next_code/
+   code_size are tracked exactly as the decoder tracks them so the emitted
+   bit widths agree with what it expects to read. */
+static void write_gif_image_data(gif_test_buf* out, const unsigned char* indices, size_t n,
+                                 int min_code_size)
+{
+    gif_test_buf packed;
+    int clear_code = 1 << min_code_size;
+    int end_code = clear_code + 1;
+    int code_size = min_code_size + 1;
+    int next_code = end_code + 1;
+    uint32_t bitbuf = 0;
+    int bitcount = 0;
+    size_t i;
+    unsigned char sizebyte;
+
+    memset(&packed, 0, sizeof(packed));
+
+#define GIF_EMIT(code) do { \
+    bitbuf |= (uint32_t)(code) << bitcount; bitcount += code_size; \
+    while (bitcount >= 8) { \
+        unsigned char byte_ = (unsigned char)(bitbuf & 0xFF); \
+        gtb_put(&packed, &byte_, 1); \
+        bitbuf >>= 8; bitcount -= 8; \
+    } \
+} while (0)
+
+    GIF_EMIT(clear_code);
+    for (i = 0; i < n; ++i) {
+        GIF_EMIT(indices[i]);
+        /* The decoder defines no new entry for the first code after Clear
+           (its prev_code is -1 then); every code after that defines one. */
+        if (i > 0 && next_code < 4096) {
+            ++next_code;
+            if (next_code == (1 << code_size) && code_size < 12) { ++code_size; }
+        }
+    }
+    GIF_EMIT(end_code);
+    if (bitcount > 0) { unsigned char byte_ = (unsigned char)(bitbuf & 0xFF); gtb_put(&packed, &byte_, 1); }
+#undef GIF_EMIT
+
+    gtb_u8(out, (unsigned char)min_code_size);
+    for (i = 0; i < packed.size; ) {
+        size_t chunk = packed.size - i;
+        if (chunk > 255) { chunk = 255; }
+        sizebyte = (unsigned char)chunk;
+        gtb_put(out, &sizebyte, 1);
+        gtb_put(out, packed.data + i, chunk);
+        i += chunk;
+    }
+    sizebyte = 0;
+    gtb_put(out, &sizebyte, 1);
+    free(packed.data);
+}
+
+static void write_gce(gif_test_buf* b, uint8_t disposal, int transparent_flag,
+                      uint8_t transparent_index, uint16_t delay_cs)
+{
+    unsigned char packed = (unsigned char)(((disposal & 0x07) << 2) | (transparent_flag ? 1 : 0));
+    gtb_u8(b, 0x21); gtb_u8(b, 0xF9); gtb_u8(b, 4);
+    gtb_u8(b, packed);
+    gtb_le16(b, delay_cs);
+    gtb_u8(b, transparent_index);
+    gtb_u8(b, 0);
+}
+
+static void write_gif_frame(gif_test_buf* b, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                            const unsigned char* indices, int min_code_size)
+{
+    gtb_u8(b, 0x2C);
+    gtb_le16(b, x); gtb_le16(b, y); gtb_le16(b, w); gtb_le16(b, h);
+    gtb_u8(b, 0x00); /* no local colour table, no interlace */
+    write_gif_image_data(b, indices, (size_t)w * h, min_code_size);
+}
+
+/* Exercises every disposal method and transparency on a hand-built 4x4,
+   4-colour GIF -- real corpus files (see check_gif_real below) may never
+   happen to use BACKGROUND/PREVIOUS disposal, or a first frame smaller than
+   the canvas, at all, so this is the only thing that pins their exact
+   compositing semantics down.
+
+   Canvas area no frame has ever drawn to, and whatever a BACKGROUND
+   disposal clears, are both transparent -- measured against Chromium's own
+   GIF renderer (2026-09-18) after ffmpeg's GIF decoder briefly looked like
+   the opposite: ffmpeg fills such area with the Logical Screen Descriptor's
+   background colour, matching GIF89a's advisory text literally, but
+   Chromium (the rendering that actually matters for "what a GIF looks
+   like") renders it transparent regardless of the background colour index,
+   on both "a first frame smaller than the canvas" and "a frame's own
+   transparent-index pixels" -- ffmpeg is the outlier here, not this
+   project's original guess.
+
+   Four frames on a 4x4 canvas, palette {0:black, 1:red, 2:green, 3:blue}:
+     A: full canvas red, disposal=NONE.
+     B: 2x2 blue at (1,1), disposal=BACKGROUND -- clears that rect to
+        transparent for whatever comes next.
+     C: 2x2 green at (0,0) but its (1,1) corner is transparent (index 0,
+        declared transparent), disposal=PREVIOUS -- undoes C entirely
+        afterwards, restoring exactly what B's disposal left.
+     D: full canvas blue, disposal=UNSPECIFIED -- the "no GCE-defined
+        behaviour" case, which should behave like NONE. */
+static int check_gif(void)
+{
+    gif_test_buf f;
+    unsigned char gct[4 * 3] = {
+        0, 0, 0,     /* 0: black -- doubles as the transparent index in frame C */
+        255, 0, 0,   /* 1: red */
+        0, 255, 0,   /* 2: green */
+        0, 0, 255,   /* 3: blue */
+    };
+    unsigned char red_full[16], blue_sq[4], green_with_hole[4], blue_full[16];
+    int i;
+    apxl_anim a;
+    int ok = 1;
+    char path[] = "pxl_gif_check_tmp.gif";
+    int x, y;
+
+    for (i = 0; i < 16; ++i) { red_full[i] = 1; blue_full[i] = 3; }
+    for (i = 0; i < 4; ++i) { blue_sq[i] = 3; }
+    green_with_hole[0] = 2; green_with_hole[1] = 2; green_with_hole[2] = 2; green_with_hole[3] = 0;
+
+    memset(&f, 0, sizeof(f));
+    gtb_put(&f, "GIF89a", 6);
+    gtb_le16(&f, 4); gtb_le16(&f, 4);
+    gtb_u8(&f, (unsigned char)(0x80 | 0x01)); /* global colour table, size field 1 -> 4 entries */
+    gtb_u8(&f, 0); gtb_u8(&f, 0);
+    gtb_put(&f, gct, sizeof(gct));
+
+    /* NETSCAPE2.0 loop extension, loop forever -- exercises that path too. */
+    gtb_u8(&f, 0x21); gtb_u8(&f, 0xFF); gtb_u8(&f, 11);
+    gtb_put(&f, "NETSCAPE2.0", 11);
+    gtb_u8(&f, 3); gtb_u8(&f, 1); gtb_le16(&f, 0);
+    gtb_u8(&f, 0);
+
+    write_gce(&f, 1 /* NONE */, 0, 0, 10);
+    write_gif_frame(&f, 0, 0, 4, 4, red_full, 2);
+
+    write_gce(&f, 2 /* BACKGROUND */, 0, 0, 20);
+    write_gif_frame(&f, 1, 1, 2, 2, blue_sq, 2);
+
+    write_gce(&f, 3 /* PREVIOUS */, 1, 0, 30);
+    write_gif_frame(&f, 0, 0, 2, 2, green_with_hole, 2);
+
+    write_gce(&f, 0 /* UNSPECIFIED */, 0, 0, 5);
+    write_gif_frame(&f, 0, 0, 4, 4, blue_full, 2);
+
+    gtb_u8(&f, 0x3B);
+
+    {
+        FILE* fp = fopen(path, "wb");
+        if (!fp || fwrite(f.data, 1, f.size, fp) != f.size) { printf("[FAIL] gif: write tmp\n"); ok = 0; }
+        if (fp) { fclose(fp); }
+    }
+    free(f.data);
+    if (!ok) { return 0; }
+
+    a = gif_load(path);
+    remove(path);
+
+    if (!a.frames || a.frame_count != 4 || a.canvas_w != 4 || a.canvas_h != 4 ||
+        a.channels != 4 || a.bytes_per_channel != 1 || a.loop_count != 0) {
+        printf("[FAIL] gif: load shape (frames=%u %ux%u ch=%u loop=%u)\n",
+               a.frame_count, a.canvas_w, a.canvas_h, a.channels, a.loop_count);
+        apxl_free(&a);
+        return 0;
+    }
+
+#define GIF_PX(buf, px, py) ((buf) + ((size_t)(py) * 4 + (px)) * 4)
+    for (y = 0; y < 4 && ok; ++y) {
+        for (x = 0; x < 4 && ok; ++x) {
+            const uint8_t* pa = GIF_PX(a.frames[0].image.buffer.data, x, y);
+            const uint8_t* pb = GIF_PX(a.frames[1].image.buffer.data, x, y);
+            const uint8_t* pc = GIF_PX(a.frames[2].image.buffer.data, x, y);
+            const uint8_t* pd = GIF_PX(a.frames[3].image.buffer.data, x, y);
+            int inside_b = (x >= 1 && x <= 2 && y >= 1 && y <= 2);
+
+            if (pa[0] != 255 || pa[1] != 0 || pa[2] != 0 || pa[3] != 255) {
+                printf("[FAIL] gif: frame A (%d,%d) not red\n", x, y); ok = 0; break;
+            }
+            if (inside_b) {
+                if (pb[0] != 0 || pb[1] != 0 || pb[2] != 255 || pb[3] != 255) {
+                    printf("[FAIL] gif: frame B (%d,%d) not blue\n", x, y); ok = 0; break;
+                }
+            } else if (pb[0] != 255 || pb[1] != 0 || pb[2] != 0 || pb[3] != 255) {
+                printf("[FAIL] gif: frame B (%d,%d) not red\n", x, y); ok = 0; break;
+            }
+            if ((x == 0 && y == 0) || (x == 1 && y == 0) || (x == 0 && y == 1)) {
+                if (pc[0] != 0 || pc[1] != 255 || pc[2] != 0 || pc[3] != 255) {
+                    printf("[FAIL] gif: frame C (%d,%d) not green\n", x, y); ok = 0; break;
+                }
+            } else if (inside_b) { /* B's BACKGROUND disposal, never redrawn opaquely by C */
+                if (pc[0] != 0 || pc[1] != 0 || pc[2] != 0 || pc[3] != 0) {
+                    printf("[FAIL] gif: frame C (%d,%d) not transparent\n", x, y); ok = 0; break;
+                }
+            } else if (pc[0] != 255 || pc[1] != 0 || pc[2] != 0 || pc[3] != 255) {
+                printf("[FAIL] gif: frame C (%d,%d) not red\n", x, y); ok = 0; break;
+            }
+            if (pd[0] != 0 || pd[1] != 0 || pd[2] != 255 || pd[3] != 255) {
+                printf("[FAIL] gif: frame D (%d,%d) not blue\n", x, y); ok = 0; break;
+            }
+        }
+    }
+#undef GIF_PX
+
+    if (ok && (a.frames[0].delay_num != 10 || a.frames[1].delay_num != 20 ||
+               a.frames[2].delay_num != 30 || a.frames[3].delay_num != 5 ||
+               a.frames[0].delay_den != 100)) {
+        printf("[FAIL] gif: delays wrong (%u/%u %u/%u %u/%u %u/%u)\n",
+               a.frames[0].delay_num, a.frames[0].delay_den, a.frames[1].delay_num, a.frames[1].delay_den,
+               a.frames[2].delay_num, a.frames[2].delay_den, a.frames[3].delay_num, a.frames[3].delay_den);
+        ok = 0;
+    }
+
+    if (ok) {
+        printf("[ OK ] gif: 4 frames 4x4, NONE/BACKGROUND/PREVIOUS/UNSPECIFIED disposal "
+               "and transparency all composited correctly, infinite loop\n");
+    }
+    apxl_free(&a);
+    return ok;
+}
+
+/* Loads a real, freely-licensed GIF (see tests/data/README.md) end to end:
+   gif_load -> apxl_anim_try_index -> apxl_encode -> apxl_decode -> apng_save
+   -> apng_load, comparing the final RGBA pixels against a copy of
+   gif_load's own output saved before apxl_anim_try_index converts it to
+   indexed in place. This is the same role real_apng plays for the APNG
+   path: proof that a real downloaded file works, not just the hand-built
+   shapes in check_gif above. */
+static int check_gif_real(const char* gif_path, const char* tmp_apng)
+{
+    apxl_anim direct, reloaded;
+    pxl_buffer enc;
+    uint32_t f;
+    int ok = 1;
+    uint8_t** rgba_before = NULL; /* direct's own pixels, saved before
+                                     apxl_anim_try_index mutates it in place */
+
+    direct = gif_load(gif_path);
+    if (!direct.frames) {
+        printf("[SKIP] gif_real: cannot read '%s'\n", gif_path);
+        return 1; /* asset-backed case: absence is not this test's failure */
+    }
+
+    rgba_before = (uint8_t**)calloc(direct.frame_count, sizeof(uint8_t*));
+    if (!rgba_before) { printf("[FAIL] gif_real: alloc\n"); apxl_free(&direct); return 0; }
+    for (f = 0; f < direct.frame_count; ++f) {
+        pxl_buffer* b = &direct.frames[f].image.buffer;
+        rgba_before[f] = (uint8_t*)malloc(b->size);
+        if (!rgba_before[f]) { ok = 0; break; }
+        memcpy(rgba_before[f], b->data, b->size);
+    }
+    if (!ok) {
+        for (f = 0; f < direct.frame_count; ++f) { free(rgba_before[f]); }
+        free(rgba_before);
+        printf("[FAIL] gif_real: alloc\n");
+        apxl_free(&direct);
+        return 0;
+    }
+
+    if (!apxl_anim_try_index(&direct)) {
+        printf("[FAIL] gif_real: '%s' composited to more than 256 colours "
+               "(expected the committed fixture to fit)\n", gif_path);
+        for (f = 0; f < direct.frame_count; ++f) { free(rgba_before[f]); }
+        free(rgba_before);
+        apxl_free(&direct);
+        return 0;
+    }
+
+    enc = apxl_encode(&direct, 12);
+    if (!enc.data) {
+        printf("[FAIL] gif_real: encode\n");
+        for (f = 0; f < direct.frame_count; ++f) { free(rgba_before[f]); }
+        free(rgba_before);
+        apxl_free(&direct);
+        return 0;
+    }
+
+    memset(&reloaded, 0, sizeof(reloaded));
+    {
+        apxl_anim decoded = apxl_decode(enc);
+        if (!decoded.frames) { printf("[FAIL] gif_real: decode\n"); ok = 0; }
+        else if (!apng_save(tmp_apng, &decoded)) {
+            printf("[FAIL] gif_real: apng_save of the indexed result\n"); ok = 0;
+        } else {
+            reloaded = apng_load(tmp_apng);
+            remove(tmp_apng);
+            if (!reloaded.frames || reloaded.frame_count != direct.frame_count) {
+                printf("[FAIL] gif_real: apng_load of the saved file\n"); ok = 0;
+            }
+        }
+        apxl_free(&decoded);
+    }
+
+    if (ok) {
+        for (f = 0; f < direct.frame_count; ++f) {
+            /* Both sides are RGBA8 here: rgba_before was saved before
+               apxl_anim_try_index converted `direct` to indexed in place,
+               and reloaded went indexed -> RGBA through the real file
+               format (apng_load always yields RGBA8). Comparing against a
+               re-expansion of `direct` itself would be wrong whenever the
+               palette turned out fully opaque -- pxl_image_expand then
+               yields 3-channel RGB, not 4-channel RGBA, a stride mismatch
+               against reloaded's RGBA that a raw memcmp can't paper over. */
+            pxl_buffer* rb = &reloaded.frames[f].image.buffer;
+            if (rb->size != (size_t)direct.canvas_w * direct.canvas_h * 4 ||
+                memcmp(rgba_before[f], rb->data, rb->size) != 0) {
+                printf("[FAIL] gif_real: frame %u differs after the full round trip\n", f);
+                ok = 0;
+            }
+        }
+    }
+
+    if (ok) {
+        printf("[ OK ] gif_real: %s (%u frames, %ux%u) -> indexed .apxl (%zu bytes) -> "
+               "APNG, lossless\n", gif_path, direct.frame_count, direct.canvas_w, direct.canvas_h,
+               enc.size);
+    }
+
+    for (f = 0; f < direct.frame_count; ++f) { free(rgba_before[f]); }
+    free(rgba_before);
+
+    pxl_free(&enc);
+    apxl_free(&direct);
+    apxl_free(&reloaded);
     return ok;
 }
 
@@ -1610,12 +1975,13 @@ int main(int argc, char** argv)
     /* tests/data, passed by CMake so the test runs from any build directory.
        Without it the asset-backed cases report SKIP rather than fail. */
     const char* data_dir = (argc > 2) ? argv[2] : NULL;
-    char real_png[512], ref_pxl[512], ref_apng[512], ref_apxl[512];
+    char real_png[512], ref_pxl[512], ref_apng[512], ref_apxl[512], real_gif[512];
     /* Scratch APNG, written next to tmp_png so it lands in the build directory
        rather than the source tree. Removed by the case that uses it. */
-    char tmp_apng[560];
+    char tmp_apng[560], tmp_gif_apng[560];
 
     snprintf(tmp_apng, sizeof(tmp_apng), "%s.tmp.apng", tmp_png);
+    snprintf(tmp_gif_apng, sizeof(tmp_gif_apng), "%s.tmp.gif.apng", tmp_png);
 
     if (data_dir) {
         snprintf(real_png, sizeof(real_png),
@@ -1626,6 +1992,7 @@ int main(int argc, char** argv)
                  "%s/Animated_PNG_example_bouncing_beach_ball.apng", data_dir);
         snprintf(ref_apxl, sizeof(ref_apxl),
                  "%s/Animated_PNG_example_bouncing_beach_ball.apxl", data_dir);
+        snprintf(real_gif, sizeof(real_gif), "%s/LittleRunner.gif", data_dir);
     }
 
     failures += !check_roundtrip("gray8",  100, 80, 1, 1);
@@ -1682,6 +2049,7 @@ int main(int argc, char** argv)
     failures += !check_convert_palette();
     failures += !check_stream_errors();
     failures += !check_bad_filter_geometry();
+    failures += !check_gif();
 
     if (data_dir) {
         failures += !check_real_png(real_png, tmp_png);
@@ -1691,6 +2059,7 @@ int main(int argc, char** argv)
            same pixels -- catches an accidental format change. */
         failures += !check_reference_pxl(ref_pxl, real_png);
         failures += !check_reference_apxl(ref_apxl, ref_apng);
+        failures += !check_gif_real(real_gif, tmp_gif_apng);
     }
 
     if (failures) {

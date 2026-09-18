@@ -89,8 +89,9 @@ the feature this measurement just justified.
 ### Implement indexed `.apxl`
 
 Decided 2026-09-18 (see item 2 above and `RESEARCH.md`'s "Indexed `.apxl`"
-entry). Container, codec, auto-palette builder, CLI and the whole APNG
-round trip are done the same day; only the PSP/GE path is not.
+entry). Container, codec, auto-palette builder, CLI, the whole APNG round
+trip, and a native GIF front end are done the same day; only the PSP/GE
+path is not.
 
 **Done:**
 
@@ -154,6 +155,32 @@ round trip are done the same day; only the PSP/GE path is not.
   under ASan/UBSan. `apng_load` itself still has no *general* fuzz harness
   (only `apxl_decode`/`pxl_meta_extract`/`inject` do, via `pxl_fuzz_decode`/
   `pxl_fuzz_meta`) — worth building one, not done here.
+- **Native GIF front end (`src/gif.c`, `pxlcore`, no libpng dependency).**
+  Hand-rolled GIF87a/89a decoder: variable-width LZW (3-12 bit codes, KwKwK
+  case), interlace, GCE/disposal (NONE/BACKGROUND/PREVIOUS, mirrors APNG's
+  dispose-then-draw model), NETSCAPE loop extension. `pxltool cg` wires it
+  straight into the indexed `.apxl` pipeline (`gif_load` → `apxl_anim_try_index`
+  → `apxl_encode`). Verified three ways: a hand-built synthetic 4×4/4-colour
+  GIF exercising every disposal method (`check_gif`), a real 6-frame file
+  end-to-end through GIF → `.apxl` → APNG (`check_gif_real`), and a 66-file
+  real-corpus batch (`bench/gif_corpus.sh`) compared pixel-for-pixel against
+  ffmpeg's GIF→APNG: 63/66 exact, 3 "failures" root-caused to ffmpeg being a
+  non-standard outlier (see below), not a bug here. Fuzzed 26 800 mutations
+  (67 real-corpus seeds × 400 mutations, 4 strategies) under ASan/UBSan: **0
+  crashes**; the fuzzer's 169 `TIMEOUT` flags were re-checked and are a
+  harness-calibration artefact (5s per-case limit, ASan overhead, loaded
+  machine) — the same large seeds decode in under 1.4s in a release build,
+  confirming linear cost, not a hang.
+  - **Found and fixed a genuine GIF-semantics ambiguity along the way:**
+    canvas area no frame ever covers, and area a `BACKGROUND`-disposal frame
+    clears, is specified by GIF89a's advisory text as fillable with the
+    Logical Screen Descriptor's background colour, and ffmpeg's decoder
+    implements that literally — but real browser rendering (verified via
+    Chromium `<canvas>.getImageData()` against two corpus files where this
+    mattered) renders it **fully transparent (0,0,0,0)** instead, same as an
+    explicitly-transparent pixel. `gif.c` follows the browser behaviour
+    (transparent), not ffmpeg's; this is why 3 of the 66 corpus files "fail"
+    against an ffmpeg reference despite being correct.
 
 **Not done — still open:**
 
@@ -161,10 +188,6 @@ round trip are done the same day; only the PSP/GE path is not.
   wired up for still `.pxl` textures; nothing yet takes a decoded indexed
   `.apxl` frame sequence to a GE-native animated texture the way the "Animated
   `.apxl` texture playback on PSP" item below describes for RGBA.
-- **No native GIF front end.** The real-corpus verification above went
-  through ffmpeg's GIF→APNG conversion, not a GIF decoder in this project —
-  fine for verification, but means nothing here can take a `.gif` file
-  directly yet.
 - **`apng_load` fuzz coverage**, per the safety note above.
 
 ### Real charts: texture load pipeline, PXL vs PNG, init to use, plus weight

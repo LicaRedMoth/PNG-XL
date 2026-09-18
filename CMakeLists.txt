@@ -94,7 +94,8 @@ set(PXLCORE_SOURCES
     src/pxl_codec_encode.c
     src/pxl_codec_decode.c
     src/pxl_io.c
-    src/apxl_codec.c)
+    src/apxl_codec.c
+    src/gif.c)
 
 add_library(pxlcore_obj OBJECT ${PXLCORE_SOURCES})
 set_property(TARGET pxlcore_obj PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -402,7 +403,7 @@ install(TARGETS pxl pxl_static pxlcore pxlcore_static pxltool
 # container headers (as pxltool does) needs both. pxl_bytes.h / pxl_meta.h /
 # pxl_pngio.h stay internal -- only our .c files include them.
 install(FILES src/pxl.h src/pxl_png.h src/pxl_format.h
-              src/apxl.h src/apxl_format.h src/apng.h DESTINATION include)
+              src/apxl.h src/apxl_format.h src/apng.h src/gif.h DESTINATION include)
 
 # pkg-config metadata. FFmpeg's configure locates optional external libraries
 # with require_pkg_config, so the .pc files are what make --enable-libpxl work;

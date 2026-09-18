@@ -12,6 +12,7 @@
 #include "apxl.h"
 #include "apxl_format.h"
 #include "apng.h"
+#include "gif.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,6 +277,57 @@ static int cmd_anim_compress(const char* in, const char* out, int level, int try
     return 0;
 }
 
+static int cmd_gif_compress(const char* in, const char* out, int level, int try_indexed)
+{
+    apxl_anim anim;
+    pxl_buffer enc;
+    long src_size;
+
+    anim = gif_load(in);
+    if (!anim.frames) {
+        fprintf(stderr, "error: could not load GIF '%s'\n", in);
+        return 1;
+    }
+
+    if (try_indexed) {
+        if (apxl_anim_try_index(&anim)) {
+            printf("  indexed: %u-colour global palette fits, encoding as indexed\n",
+                   pxl_palette_count(&anim.frames[0].image));
+        } else {
+            printf("  indexed: source doesn't fit one 256-colour palette, encoding as RGBA\n");
+        }
+    }
+
+    enc = apxl_encode(&anim, level);
+    if (!enc.data) {
+        fprintf(stderr, "error: animation encoding failed\n");
+        apxl_free(&anim);
+        return 1;
+    }
+
+    if (!write_file(out, enc.data, enc.size)) {
+        fprintf(stderr, "error: could not write '%s'\n", out);
+        pxl_free(&enc);
+        apxl_free(&anim);
+        return 1;
+    }
+
+    src_size = file_size(in);
+    printf("%s -> %s\n", in, out);
+    printf("  %ux%u, %u frames, loop %u\n",
+           anim.canvas_w, anim.canvas_h, anim.frame_count, anim.loop_count);
+    if (src_size > 0) {
+        printf("  GIF %ld bytes -> APXL %zu bytes (%.1f%%)\n",
+               src_size, enc.size, 100.0 * (double)enc.size / (double)src_size);
+    } else {
+        printf("  APXL %zu bytes\n", enc.size);
+    }
+
+    pxl_free(&enc);
+    apxl_free(&anim);
+    return 0;
+}
+
 static int cmd_anim_decompress(const char* in, const char* out)
 {
     unsigned char* file;
@@ -365,6 +417,7 @@ static void usage(void)
         "  pxltool d     in.pxl  out.png                        decompress PXL  -> PNG\n"
         "  pxltool info  in.pxl                                 print .pxl header\n"
         "  pxltool ca    in.apng out.apxl [-l LEVEL] [-i]        compress APNG -> APXL\n"
+        "  pxltool cg    in.gif  out.apxl [-l LEVEL] [-i]        compress GIF  -> APXL\n"
         "  pxltool da    in.apxl out.apng                       decompress APXL -> APNG\n"
         "  pxltool ainfo in.apxl                                print .apxl header\n"
         "\n"
@@ -465,6 +518,32 @@ int main(int argc, char** argv)
             }
         }
         return cmd_anim_compress(argv[2], argv[3], level, try_indexed);
+    }
+    if (strcmp(argv[1], "cg") == 0) {
+        int level = APXL_LEVEL_DEFAULT;
+        int try_indexed = 0;
+        int i;
+        if (argc < 4) {
+            usage();
+            return 2;
+        }
+        for (i = 4; i < argc; ++i) {
+            if (strcmp(argv[i], "-i") == 0) {
+                try_indexed = 1;
+            } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+                level = atoi(argv[++i]);
+                if (level > PXL_LEVEL_MAX) {
+                    fprintf(stderr,
+                        "note: level %d exceeds zstd max %d; clamping to %d\n",
+                        level, PXL_LEVEL_MAX, PXL_LEVEL_MAX);
+                }
+            } else {
+                fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+                usage();
+                return 2;
+            }
+        }
+        return cmd_gif_compress(argv[2], argv[3], level, try_indexed);
     }
     if (strcmp(argv[1], "da") == 0) {
         if (argc < 4) {
