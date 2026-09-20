@@ -1668,3 +1668,17 @@ geometry-check machinery itself stays covered. Two new tests added:
 R=G=B, opaque alpha) and `check_output_format_gray_alpha` (RGBA5551, real
 alpha from the source's own second byte, not the opaque default) — both
 clean under ASan/UBSan alongside the full existing suite.
+
+**Spot-checked against real content, same day**: every PNG under
+`/usr/share/icons` (5591 files, all installed themes — Adwaita, hicolor,
+HighContrast, breeze, ...), deduplicated by content hash, filtered to
+genuinely non-indexed 1-/2-channel sources (PIL `L`/`LA` — most
+HighContrast icons turned out to be indexed (`P` mode) despite looking
+monochrome, so this is a narrower slice than "the whole HighContrast
+theme"). 256 unique files (`L`: 2, `LA`: 254) run through `pxl_encode` →
+`pxl_stream_new_ex(PXL_OUTPUT_RGBA8888)`, checked against an expected
+RGBA8888 buffer computed independently in Python (not reusing any PXL
+code, so this isn't just the library agreeing with itself) — **256/256
+bit-exact**. Not committed as a corpus or a script (nothing to fetch;
+reproduce by pointing the same check at any installed icon theme), same
+convention the 2026-09-15 dictionary-on-icons entry above used.
