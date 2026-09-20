@@ -699,64 +699,73 @@ struct pxl_stream {
     int        frame_done;
 };
 
-/* Converts one already-decoded row of `src_channels` 8-bit samples (3 or 4;
-   a 3-channel source asked for an alpha-carrying format reads as fully
-   opaque) into `fmt`. `out` must hold at least `width` samples of `fmt`'s
-   width (2 bytes for the packed 16-bit formats, 4 for RGBA8888). Never
-   called under PXL_OUTPUT_NATIVE, which bypasses conversion entirely. */
+/* Converts one already-decoded row of `src_channels` 8-bit samples (1-4)
+   into `fmt`. A 1- or 2-channel (gray, gray+alpha) source reads its single
+   intensity sample as R, G and B alike -- the same expansion libpng and
+   every other consumer of grayscale PNG does; a source with no alpha
+   channel of its own (1 or 3 channels) asked for an alpha-carrying format
+   reads as fully opaque. `out` must hold at least `width` samples of
+   `fmt`'s width (2 bytes for the packed 16-bit formats, 4 for RGBA8888).
+   Never called under PXL_OUTPUT_NATIVE, which bypasses conversion
+   entirely. */
 static void convert_row(pxl_output_format fmt, const uint8_t* src, uint8_t* out,
                         uint32_t width, unsigned src_channels)
 {
     uint32_t x;
-    switch (fmt) {
-    case PXL_OUTPUT_RGBA8888:
-        if (src_channels == 4) {
-            memcpy(out, src, (size_t)width * 4);
-            return;
-        }
-        for (x = 0; x < width; ++x) {
-            const uint8_t* p = src + (size_t)x * src_channels;
-            out[x * 4 + 0] = p[0];
-            out[x * 4 + 1] = p[1];
-            out[x * 4 + 2] = p[2];
-            out[x * 4 + 3] = 0xFF;
-        }
+
+    if (fmt == PXL_OUTPUT_RGBA8888 && src_channels == 4) {
+        memcpy(out, src, (size_t)width * 4);
         return;
-    case PXL_OUTPUT_RGB565:
-        for (x = 0; x < width; ++x) {
-            const uint8_t* p = src + (size_t)x * src_channels;
-            unsigned v = ((unsigned)(p[0] >> 3) << 11) |
-                         ((unsigned)(p[1] >> 2) << 5) |
-                         (unsigned)(p[2] >> 3);
+    }
+    for (x = 0; x < width; ++x) {
+        const uint8_t* p = src + (size_t)x * src_channels;
+        uint8_t r, g, b, a;
+
+        if (src_channels <= 2) {
+            r = g = b = p[0];
+            a = (src_channels == 2) ? p[1] : 0xFFu;
+        } else {
+            r = p[0]; g = p[1]; b = p[2];
+            a = (src_channels == 4) ? p[3] : 0xFFu;
+        }
+
+        switch (fmt) {
+        case PXL_OUTPUT_RGBA8888:
+            out[x * 4 + 0] = r;
+            out[x * 4 + 1] = g;
+            out[x * 4 + 2] = b;
+            out[x * 4 + 3] = a;
+            break;
+        case PXL_OUTPUT_RGB565: {
+            unsigned v = ((unsigned)(r >> 3) << 11) |
+                         ((unsigned)(g >> 2) << 5) |
+                         (unsigned)(b >> 3);
             out[x * 2 + 0] = (uint8_t)v;
             out[x * 2 + 1] = (uint8_t)(v >> 8);
+            break;
         }
-        return;
-    case PXL_OUTPUT_RGBA5551:
-        for (x = 0; x < width; ++x) {
-            const uint8_t* p = src + (size_t)x * src_channels;
-            unsigned a = (src_channels == 4) ? (unsigned)(p[3] >> 7) : 1u;
-            unsigned v = ((unsigned)(p[0] >> 3) << 11) |
-                         ((unsigned)(p[1] >> 3) << 6) |
-                         ((unsigned)(p[2] >> 3) << 1) | a;
+        case PXL_OUTPUT_RGBA5551: {
+            unsigned v = ((unsigned)(r >> 3) << 11) |
+                         ((unsigned)(g >> 3) << 6) |
+                         ((unsigned)(b >> 3) << 1) |
+                         (unsigned)(a >> 7);
             out[x * 2 + 0] = (uint8_t)v;
             out[x * 2 + 1] = (uint8_t)(v >> 8);
+            break;
         }
-        return;
-    case PXL_OUTPUT_RGBA4444:
-        for (x = 0; x < width; ++x) {
-            const uint8_t* p = src + (size_t)x * src_channels;
-            unsigned a = (src_channels == 4) ? (unsigned)(p[3] >> 4) : 0xFu;
-            unsigned v = ((unsigned)(p[0] >> 4) << 12) |
-                         ((unsigned)(p[1] >> 4) << 8) |
-                         ((unsigned)(p[2] >> 4) << 4) | a;
+        case PXL_OUTPUT_RGBA4444: {
+            unsigned v = ((unsigned)(r >> 4) << 12) |
+                         ((unsigned)(g >> 4) << 8) |
+                         ((unsigned)(b >> 4) << 4) |
+                         (unsigned)(a >> 4);
             out[x * 2 + 0] = (uint8_t)v;
             out[x * 2 + 1] = (uint8_t)(v >> 8);
+            break;
         }
-        return;
-    case PXL_OUTPUT_NATIVE:
-    default:
-        return; /* unreachable: callers branch on out_fmt before calling */
+        case PXL_OUTPUT_NATIVE:
+        default:
+            break; /* unreachable: callers branch on out_fmt before calling */
+        }
     }
 }
 
@@ -873,9 +882,12 @@ static int stream_begin(pxl_stream* s)
          (s->h.channels != 3 && s->h.channels != 4))) {
         return 0;
     }
+    /* Packed-format conversion is defined for any non-indexed 8-bit source
+       (1-4 channels, per convert_row above) -- indexed samples are palette
+       indices, not intensity, so palette_count must stay 0 here regardless
+       of channel count; pxl_convert_palette is the dedicated indexed path. */
     if (s->out_fmt != PXL_OUTPUT_NATIVE &&
-        (s->h.bit_depth != 8 || s->h.palette_count != 0 ||
-         (s->h.channels != 3 && s->h.channels != 4))) {
+        (s->h.bit_depth != 8 || s->h.palette_count != 0)) {
         return 0;
     }
 

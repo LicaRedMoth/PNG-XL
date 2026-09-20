@@ -1365,37 +1365,161 @@ static int check_output_format_rgb_no_alpha(void)
     return ok;
 }
 
-/* Requesting a packed output format on geometry it is not defined for
-   (anything but 8-bit, non-indexed, 3/4-channel) must fail once the header
-   says so, the same way any other geometry mismatch is reported. */
-static int check_output_format_rejects_bad_geometry(void)
+/* A 1-channel (gray, no palette) source: R=G=B=the single intensity sample,
+   and (like a 3-channel source) no alpha channel of its own, so
+   alpha-carrying formats read opaque. Real gap this closes (2026-09-20): a
+   downstream project's GE texture path fed grayscale UI assets (a logo, a
+   warning label) through pxl_stream_new_ex and got silently rejected --
+   not a crash, just an invisible texture -- because this used to be in the
+   rejected geometry set alongside genuinely undefined cases (16-bit,
+   indexed). The expansion itself is the one libpng and every other
+   consumer of grayscale PNG already does. */
+static int check_output_format_gray(void)
 {
+    static const uint8_t px[4] = { 255, 0, 128, 17 };
     pxl_image src;
     pxl_buffer enc;
-    pxl_stream* s;
-    int fed, ok;
-    uint8_t px[4] = { 10, 20, 30, 40 }; /* 2x2 8-bit GRAY, 1 channel */
+    int fi, ok = 1;
+    static const pxl_output_format fmts[] = {
+        PXL_OUTPUT_RGBA8888, PXL_OUTPUT_RGB565, PXL_OUTPUT_RGBA5551, PXL_OUTPUT_RGBA4444
+    };
 
     memset(&src, 0, sizeof src);
     src.buffer.size = sizeof px;
     src.buffer.data = (unsigned char*)malloc(src.buffer.size);
+    if (!src.buffer.data) { printf("[FAIL] output_format_gray: alloc\n"); return 0; }
     memcpy(src.buffer.data, px, sizeof px);
-    src.width = 2; src.height = 2; src.channels = 1; src.bytes_per_channel = 1;
+    src.width = 4; src.height = 1; src.channels = 1; src.bytes_per_channel = 1;
 
     enc = pxl_encode(&src, 6);
-    if (!enc.data) { printf("[FAIL] output_format_reject: encode\n"); pxl_image_free(&src); return 0; }
+    if (!enc.data) { printf("[FAIL] output_format_gray: encode\n"); pxl_image_free(&src); return 0; }
 
-    s = pxl_stream_new_ex(NULL, NULL, PXL_OUTPUT_RGB565);
+    for (fi = 0; fi < (int)(sizeof fmts / sizeof fmts[0]); fi++) {
+        pxl_output_format fmt = fmts[fi];
+        size_t unit = (fmt == PXL_OUTPUT_RGBA8888) ? 4 : 2;
+        uint8_t want[16];
+        uint8_t got_buf[16];
+        out_collect c;
+        pxl_stream* s;
+        int i, fed;
+
+        for (i = 0; i < 4; i++) {
+            uint8_t gray = px[i];
+            uint8_t* w = want + (size_t)i * unit;
+            if (fmt == PXL_OUTPUT_RGBA8888) {
+                w[0] = gray; w[1] = gray; w[2] = gray; w[3] = 0xFF;
+            } else if (fmt == PXL_OUTPUT_RGB565) {
+                expected_565(gray, gray, gray, w);
+            } else if (fmt == PXL_OUTPUT_RGBA5551) {
+                expected_5551(gray, gray, gray, 0xFF, w);
+            } else {
+                expected_4444(gray, gray, gray, 0xFF, w);
+            }
+        }
+
+        c.out = got_buf; c.cap = sizeof got_buf; c.len = 0; c.overflowed = 0;
+        s = pxl_stream_new_ex(collect_row_cb, &c, fmt);
+        if (!s) { printf("[FAIL] output_format_gray: stream_new_ex\n"); ok = 0; continue; }
+        fed = pxl_stream_feed(s, enc.data, enc.size);
+        if (fed < 0 || !pxl_stream_finish(s) || c.overflowed ||
+            c.len != (size_t)4 * unit ||
+            memcmp(c.out, want, (size_t)4 * unit) != 0) {
+            printf("[FAIL] output_format_gray: fmt=%d mismatch (fed=%d len=%zu)\n",
+                   (int)fmt, fed, c.len);
+            ok = 0;
+        } else {
+            printf("[ OK ] output_format_gray: fmt=%d, %zu bytes/pixel, gray expanded to RGB\n",
+                   (int)fmt, unit);
+        }
+        pxl_stream_free(s);
+    }
+
+    pxl_free(&enc);
+    pxl_image_free(&src);
+    return ok;
+}
+
+/* A 2-channel (gray+alpha) source: R=G=B=the intensity sample, but alpha is
+   the source's own second byte, not the opaque default a 1-channel source
+   gets -- the same "has its own alpha vs doesn't" distinction
+   check_output_format_rgb_no_alpha already draws for 3 vs 4 channels,
+   drawn here for 1 vs 2. */
+static int check_output_format_gray_alpha(void)
+{
+    static const uint8_t px[2][2] = { { 200, 40 }, { 10, 250 } };
+    pxl_image src;
+    pxl_buffer enc;
+    uint8_t want[2][2];
+    uint8_t got[4];
+    out_collect c;
+    pxl_stream* s;
+    int fed, ok;
+
+    memset(&src, 0, sizeof src);
+    src.buffer.size = sizeof px;
+    src.buffer.data = (unsigned char*)malloc(src.buffer.size);
+    if (!src.buffer.data) { printf("[FAIL] output_format_gray_alpha: alloc\n"); return 0; }
+    memcpy(src.buffer.data, px, sizeof px);
+    src.width = 2; src.height = 1; src.channels = 2; src.bytes_per_channel = 1;
+
+    enc = pxl_encode(&src, 6);
+    if (!enc.data) { printf("[FAIL] output_format_gray_alpha: encode\n"); pxl_image_free(&src); return 0; }
+
+    expected_5551(px[0][0], px[0][0], px[0][0], px[0][1], want[0]);
+    expected_5551(px[1][0], px[1][0], px[1][0], px[1][1], want[1]);
+
+    c.out = got; c.cap = sizeof got; c.len = 0; c.overflowed = 0;
+    s = pxl_stream_new_ex(collect_row_cb, &c, PXL_OUTPUT_RGBA5551);
     fed = s ? pxl_stream_feed(s, enc.data, enc.size) : -1;
-    ok = (fed == -1);
+    ok = s && fed >= 0 && pxl_stream_finish(s) && !c.overflowed &&
+         c.len == sizeof want && memcmp(c.out, want, sizeof want) == 0;
     if (ok) {
-        printf("[ OK ] output_format_reject: 1-channel source + RGB565 correctly rejected\n");
+        printf("[ OK ] output_format_gray_alpha: 2-channel source, real alpha reads under 5551\n");
     } else {
-        printf("[FAIL] output_format_reject: should have failed, fed=%d\n", fed);
+        printf("[FAIL] output_format_gray_alpha: 2-channel source alpha handling\n");
     }
     if (s) { pxl_stream_free(s); }
     pxl_free(&enc);
     pxl_image_free(&src);
+    return ok;
+}
+
+/* Requesting a packed output format on geometry it is not defined for
+   (16-bit-per-channel, or indexed) must still fail once the header says so,
+   the same way any other geometry mismatch is reported. 1- and 2-channel
+   (gray, gray+alpha) sources used to be in this rejected set too -- see
+   check_output_format_gray/check_output_format_gray_alpha below for why
+   that changed (2026-09-20): they are well-defined (R=G=B=the intensity
+   sample), and a downstream project's GE texture path was silently
+   dropping grayscale UI assets it fed through this exact rejection. */
+static int check_output_format_rejects_bad_geometry(void)
+{
+    pxl_image src16;
+    pxl_buffer enc16;
+    pxl_stream* s;
+    int fed, ok;
+    uint16_t px16[2 * 2 * 3] = { 100,200,300,400,500,600,700,800,900,1000,1100,1200 };
+
+    memset(&src16, 0, sizeof src16);
+    src16.buffer.size = sizeof px16;
+    src16.buffer.data = (unsigned char*)malloc(src16.buffer.size);
+    memcpy(src16.buffer.data, px16, sizeof px16);
+    src16.width = 2; src16.height = 2; src16.channels = 3; src16.bytes_per_channel = 2;
+
+    enc16 = pxl_encode(&src16, 6);
+    if (!enc16.data) { printf("[FAIL] output_format_reject: encode\n"); pxl_image_free(&src16); return 0; }
+
+    s = pxl_stream_new_ex(NULL, NULL, PXL_OUTPUT_RGB565);
+    fed = s ? pxl_stream_feed(s, enc16.data, enc16.size) : -1;
+    ok = (fed == -1);
+    if (ok) {
+        printf("[ OK ] output_format_reject: 16-bit source + RGB565 correctly rejected\n");
+    } else {
+        printf("[FAIL] output_format_reject: should have failed, fed=%d\n", fed);
+    }
+    if (s) { pxl_stream_free(s); }
+    pxl_free(&enc16);
+    pxl_image_free(&src16);
     return ok;
 }
 
@@ -2045,6 +2169,8 @@ int main(int argc, char** argv)
     failures += !check_stream_one("one_px",        1,  1, 4, 1, 0, 0xFF, 0, 0xFF);
     failures += !check_output_format_rgba();
     failures += !check_output_format_rgb_no_alpha();
+    failures += !check_output_format_gray();
+    failures += !check_output_format_gray_alpha();
     failures += !check_output_format_rejects_bad_geometry();
     failures += !check_convert_palette();
     failures += !check_stream_errors();

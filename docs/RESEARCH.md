@@ -1611,3 +1611,60 @@ happen before this is trusted further: reproduce it independently, on this
 project's own test content, on real PSP-3008 hardware, the same "measured,
 not assumed" way every other claim here is checked — the still-open item is
 in `ROADMAP.md`'s Held section.
+
+### Grayscale sources in the PSP-native output formats: a real gap, closed
+
+**Found by actual use, not by review.** 2026-09-20, the Mogeko Castle PSP
+port reported two real assets (`logo.png`, a Japanese warning label) coming
+out invisible on their GE texture path — not a crash, just nothing drawn.
+Traced to `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/`RGBA5551`/`RGBA4444`
+conversion: `pxl_stream_feed` rejected both outright, since both PNGs are
+grayscale (1 channel, no palette), and the geometry check gated packed-
+format conversion to 3- or 4-channel sources only. The caller's own code
+didn't crash on the rejection, it just silently fell back to a stub — so
+the failure was invisible twice over, once in the library and once in the
+caller.
+
+**Was this ever actually undefined, or just unimplemented?** Checked
+`convert_row` (`src/pxl_codec_decode.c`) rather than assumed: the geometry
+check exists specifically *because* the function's R/G/B extraction
+(`p[0]`, `p[1]`, `p[2]`) would read past a 1-byte-per-pixel row into the
+next pixel's byte as if it were the green/blue channel — genuinely wrong
+output, not just untested. So the rejection was protecting against a real
+bug in the conversion, not an arbitrary restriction; the fix has to be in
+`convert_row` itself, not just a relaxed check in front of unchanged code.
+
+**The expansion is unambiguous.** Grayscale-to-RGB is R=G=B=the intensity
+sample — the same thing libpng does for `PNG_COLOR_TYPE_GRAY`, no design
+choice to make. Grayscale+alpha (2 channels) is the same with the source's
+own second byte as alpha, distinct from the "no alpha channel of its own"
+case (1 or 3 channels), which still reads fully opaque — the same
+distinction `convert_row` already drew between 3- and 4-channel sources,
+extended by one case rather than replaced.
+
+**Decision: extend, not work around.** Fixed in `convert_row` (unified
+R/G/B/A extraction per channel count: 1→gray gray gray opaque, 2→gray gray
+gray alpha, 3→as before, 4→as before, one code path per output format
+instead of duplicated per-format channel branches) and the geometry check
+in `pxl_stream_new_ex`'s `stream_start` (now `bit_depth==8 &&
+palette_count==0`, no channel-count restriction — indexed sources still
+correctly excluded, since their samples are palette indices, not
+intensity, regardless of channel count; `pxl_convert_palette` is the
+dedicated indexed path). `.pxl`'s on-disk format is untouched — grayscale
+still stores as 1 byte per pixel, no size regression; the expansion only
+happens transiently in the row buffer handed to a caller. Alternative
+considered: push the grayscale-to-RGB expansion into each caller (encode
+already-expanded RGB `.pxl` files instead). Rejected — that fixes one
+project at a time instead of the actual gap, and this project's whole
+pitch for `PXL_OUTPUT_*` is that callers shouldn't have to hand-roll
+texture-format conversion themselves.
+
+**Verification.** `check_output_format_rejects_bad_geometry`
+(`tests/roundtrip.c`) used to assert a 1-channel source *must* be rejected
+— that assertion is now backwards, so it was retargeted at a genuinely
+still-undefined geometry (16-bit-per-channel) instead of retired, so the
+geometry-check machinery itself stays covered. Two new tests added:
+`check_output_format_gray` (all four output formats, gray expanded to
+R=G=B, opaque alpha) and `check_output_format_gray_alpha` (RGBA5551, real
+alpha from the source's own second byte, not the opaque default) — both
+clean under ASan/UBSan alongside the full existing suite.

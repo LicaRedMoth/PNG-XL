@@ -169,11 +169,15 @@ typedef void (*pxl_row_cb)(void* user, uint32_t row_index,
    per-row predictors (ADAPTIVE's Paeth etc.) need the real 8-bit values to
    stay correct from row to row.
 
-   Only defined for 8-bit, non-indexed RGB (3 channel) or RGBA (4 channel)
-   source images -- pxl_stream_new_ex still returns a valid stream for
-   anything else, but pxl_stream_feed fails once the header says otherwise,
-   the same way any other geometry mismatch is reported. A 3-channel source
-   asked for an alpha-carrying format is filled fully opaque. */
+   Only defined for 8-bit, non-indexed sources -- 1 (gray), 2 (gray+alpha),
+   3 (RGB) or 4 (RGBA) channels; pxl_stream_new_ex still returns a valid
+   stream for anything else (16-bit, indexed), but pxl_stream_feed fails
+   once the header says otherwise, the same way any other geometry mismatch
+   is reported. A 1- or 2-channel source reads its single intensity sample
+   as R, G and B alike, the same expansion any other consumer of grayscale
+   PNG does. A source with no alpha channel of its own (1 or 3 channels)
+   asked for an alpha-carrying format is filled fully opaque; a 2-channel
+   source's second sample is its real alpha. */
 typedef enum {
     PXL_OUTPUT_NATIVE = 0,
     PXL_OUTPUT_RGBA8888,
