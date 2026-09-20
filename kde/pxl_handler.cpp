@@ -53,10 +53,11 @@ bool PxlHandler::canRead() const
     return looksLikePxl(head) || looksLikeApxl(head);
 }
 
-/* Converts one full-canvas pxl_image into an owned QImage. 16-bit samples are
+/* Converts one full-canvas, already-expanded (8- or 16-bit, non-indexed --
+   see pxl_image_expand()) pxl_image into an owned QImage. 16-bit samples are
    stored PNG-native big-endian in pxl_image (see pxl.h); Qt's 16-bit formats
    are host-endian, so those paths byte-swap on the way out. */
-static QImage imageFromPxl(const pxl_image& img)
+static QImage imageFromExpandedPxl(const pxl_image& img)
 {
     const uint32_t w = img.width, h = img.height;
     const unsigned char* src = img.buffer.data;
@@ -146,6 +147,28 @@ static QImage imageFromPxl(const pxl_image& img)
     default:
         return QImage();
     }
+}
+
+/* Converts one full-canvas pxl_image -- indexed or sub-8-bit or not -- into
+   an owned QImage. Always runs it through pxl_image_expand() first: the
+   handler's own switch above only ever understood plain 8-/16-bit non-
+   indexed samples, so a 1-bit source like a hand-drawn logo (packed
+   ceil(w/8) bytes per row) was being read as if it were 8-bit grayscale at
+   a full w-byte stride -- reading straight past each real row into the
+   next, which is what produced the tiled, garbled image reported
+   2026-09-20 rather than any actually-decoded pixels. pxl_image_expand()
+   is documented safe to call unconditionally (already-8-/16-bit non-
+   indexed sources come back as a plain deep copy), so this fixes both that
+   and indexed sources, which this handler never had a palette path for at
+   all. */
+static QImage imageFromPxl(const pxl_image& img)
+{
+    pxl_image expanded = pxl_image_expand(&img);
+    if (!expanded.buffer.data)
+        return QImage();
+    QImage out = imageFromExpandedPxl(expanded);
+    pxl_image_free(&expanded);
+    return out;
 }
 
 bool PxlHandler::ensureDecoded() const
