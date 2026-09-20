@@ -69,8 +69,11 @@ since the container shipped. Three things are still open:
    (Animated pixel art, Throbbers) and 76% overall; where it holds, indexed
    compresses ~33% smaller than RGBA at `.apxl`'s real settings, in 49 of 50
    files. See `RESEARCH.md`'s "Indexed `.apxl`" entry for the full numbers.
-   **Decision: build it.** Not yet started — see "Implement indexed `.apxl`"
-   below for the actual work this opens.
+   **Decision: build it. Built 2026-09-18** — container, codec, auto-palette
+   builder, CLI, the APNG round trip and a native GIF front end are all
+   done; only the PSP/GE path is still in progress (real-hardware pixel
+   confirmation pending) — see "Implement indexed `.apxl`" below for the
+   full breakdown.
 3. **Anita is the only animation corpus exercised.** `Screenrecords` (H.264,
    personal, gitignored) exists locally as a second one and is not wired into
    any bench script yet — see "Corpus gaps" below.
