@@ -1617,13 +1617,11 @@ in `ROADMAP.md`'s Held section.
 **Found by actual use, not by review.** 2026-09-20, the Mogeko Castle PSP
 port reported two real assets (`logo.png`, a Japanese warning label) coming
 out invisible on their GE texture path — not a crash, just nothing drawn.
-Traced to `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/`RGBA5551`/`RGBA4444`
-conversion: `pxl_stream_feed` rejected both outright, since both PNGs are
-grayscale (1 channel, no palette), and the geometry check gated packed-
-format conversion to 3- or 4-channel sources only. The caller's own code
-didn't crash on the rejection, it just silently fell back to a stub — so
-the failure was invisible twice over, once in the library and once in the
-caller.
+First traced to `pxl_stream_new_ex`'s `PXL_OUTPUT_RGB565`/`RGBA5551`/
+`RGBA4444` conversion rejecting a 1-channel, no-palette (grayscale) source.
+**That first diagnosis turned out to be wrong** — see the correction at the
+end of this entry — but the gap it led to fixing is real regardless, closed
+here on its own merits.
 
 **Was this ever actually undefined, or just unimplemented?** Checked
 `convert_row` (`src/pxl_codec_decode.c`) rather than assumed: the geometry
@@ -1682,3 +1680,24 @@ code, so this isn't just the library agreeing with itself) — **256/256
 bit-exact**. Not committed as a corpus or a script (nothing to fetch;
 reproduce by pointing the same check at any installed icon theme), same
 convention the 2026-09-15 dictionary-on-icons entry above used.
+
+**Correction, same day: the original diagnosis was wrong, and the two
+files that started this were never a PXL bug.** `pxltool info` on the
+actual files showed `logo.png` and the warning label are **indexed**
+PNGs (17 and 190 colours), not grayscale. PXL's exclusion of indexed
+sources from packed-format conversion is correct and intentional — an
+index is not an intensity value, and `pxl_convert_palette` is the
+purpose-built path for exactly this case (a CLUT, built once per
+palette, not a per-pixel conversion). The real gap was on the port's own
+side: its `decode_dynamic` never called `pxl_convert_palette` at all, so
+any indexed source hit an unhandled case and fell back to a stub. Fixed
+there (`decode_dynamic_indexed`: `pxl_decode` + `pxl_convert_palette` +
+their own CLUT expansion into RGBA4444 tiles), confirmed loading for real
+under `PPSSPPHeadless`. Not a PXL defect, and this entry's own grayscale
+fix did not touch either file. Left the rest of this entry as written
+rather than retracted — the gap it describes and closes (1-/2-channel
+*non-indexed* sources rejected outright) is real and independently
+verified (the 256-icon spot-check above), just not the fix these
+particular two files needed. Recorded as a reminder that "the code looks
+fixed and the report matches the symptom" is not the same as confirming
+the diagnosis against the actual file.
