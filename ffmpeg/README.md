@@ -118,7 +118,7 @@ since FFmpeg carries these properties per frame.
 
 ## Verification
 
-Against FFmpeg 8.0.git (2a06abd2d7), built clean with no warnings in these four
+Against FFmpeg 8.0.git (a50d8c7), built clean with no warnings in these four
 files:
 
 - All 8 pixel formats: encode then decode is bit-exact.

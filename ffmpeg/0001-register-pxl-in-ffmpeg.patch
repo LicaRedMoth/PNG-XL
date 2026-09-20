@@ -1,8 +1,8 @@
 diff --git a/configure b/configure
-index 63164fa54a..2149198917 100755
+index 035d4d0..bb3db51 100755
 --- a/configure
 +++ b/configure
-@@ -265,6 +265,7 @@ External library support:
+@@ -266,6 +266,7 @@ External library support:
    --enable-libopus         enable Opus de/encoding via libopus [no]
    --enable-libplacebo      enable libplacebo library [no]
    --enable-libpulse        enable Pulseaudio input via libpulse [no]
@@ -10,7 +10,7 @@ index 63164fa54a..2149198917 100755
    --enable-libqrencode     enable QR encode generation via libqrencode [no]
    --enable-libquirc        enable QR decoding via libquirc [no]
    --enable-librabbitmq     enable RabbitMQ library [no]
-@@ -2082,6 +2083,7 @@ EXTERNAL_LIBRARY_LIST="
+@@ -2099,6 +2100,7 @@ EXTERNAL_LIBRARY_LIST="
      libopus
      libplacebo
      libpulse
@@ -18,7 +18,7 @@ index 63164fa54a..2149198917 100755
      libqrencode
      libquirc
      librabbitmq
-@@ -3830,6 +3832,10 @@ libjxl_anim_encoder_deps="libjxl libjxl_threads"
+@@ -3821,6 +3823,10 @@ libjxl_anim_encoder_deps="libjxl libjxl_threads"
  libjxl_decoder_deps="libjxl libjxl_threads"
  libjxl_encoder_deps="libjxl libjxl_threads"
  libkvazaar_encoder_deps="libkvazaar"
@@ -29,7 +29,7 @@ index 63164fa54a..2149198917 100755
  liblc3_decoder_deps="liblc3"
  liblc3_encoder_deps="liblc3"
  liblc3_encoder_select="audio_frame_queue"
-@@ -7405,6 +7411,7 @@ enabled libopus           && {
+@@ -7310,6 +7316,7 @@ enabled libopus           && {
  }
  enabled libplacebo        && require_pkg_config libplacebo "libplacebo >= 7.351.0" libplacebo/vulkan.h pl_vulkan_create
  enabled libpulse          && require_pkg_config libpulse libpulse pulse/pulseaudio.h pa_context_new
@@ -38,10 +38,10 @@ index 63164fa54a..2149198917 100755
  enabled libquirc          && require libquirc quirc.h quirc_decode -lquirc
  enabled librabbitmq       && require_pkg_config librabbitmq "librabbitmq >= 0.7.1" amqp.h amqp_new_connection
 diff --git a/libavcodec/Makefile b/libavcodec/Makefile
-index 232fdd7339..a9ec278203 100644
+index e2c60e9..5a6545c 100644
 --- a/libavcodec/Makefile
 +++ b/libavcodec/Makefile
-@@ -1196,6 +1196,10 @@ OBJS-$(CONFIG_LIBILBC_ENCODER)            += libilbc.o
+@@ -1199,6 +1199,10 @@ OBJS-$(CONFIG_LIBILBC_ENCODER)            += libilbc.o
  OBJS-$(CONFIG_LIBJXL_DECODER)             += libjxldec.o libjxl.o
  OBJS-$(CONFIG_LIBJXL_ENCODER)             += libjxlenc.o libjxl.o
  OBJS-$(CONFIG_LIBKVAZAAR_ENCODER)         += libkvazaar.o
@@ -53,10 +53,10 @@ index 232fdd7339..a9ec278203 100644
  OBJS-$(CONFIG_LIBLC3_DECODER)             += liblc3dec.o
  OBJS-$(CONFIG_LIBMP3LAME_ENCODER)         += libmp3lame.o
 diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
-index e1668f1e80..c7e5e8bc03 100644
+index ca20c76..1dd638c 100644
 --- a/libavcodec/allcodecs.c
 +++ b/libavcodec/allcodecs.c
-@@ -799,6 +799,10 @@ extern const FFCodec ff_libopencore_amrwb_decoder;
+@@ -803,6 +803,10 @@ extern const FFCodec ff_libopencore_amrwb_decoder;
  extern const FFCodec ff_libopenjpeg_encoder;
  extern const FFCodec ff_libopus_encoder;
  extern const FFCodec ff_libopus_decoder;
@@ -68,12 +68,12 @@ index e1668f1e80..c7e5e8bc03 100644
  extern const FFCodec ff_librsvg_decoder;
  extern const FFCodec ff_libshine_encoder;
 diff --git a/libavcodec/codec_desc.c b/libavcodec/codec_desc.c
-index 299a469ce4..9caf6d9b04 100644
+index dc20b57..d591045 100644
 --- a/libavcodec/codec_desc.c
 +++ b/libavcodec/codec_desc.c
-@@ -1992,6 +1992,22 @@ static const AVCodecDescriptor codec_descriptors[] = {
-         .props     = AV_CODEC_PROP_LOSSY | AV_CODEC_PROP_LOSSLESS,
-         .mime_types= MT("image/webp"),
+@@ -2001,6 +2001,22 @@ static const AVCodecDescriptor codec_descriptors[] = {
+         .profiles  = NULL_IF_CONFIG_SMALL(ff_astc_profiles),
+         .mime_types= MT("image/astc"),
      },
 +    {
 +        .id        = AV_CODEC_ID_PXL,
@@ -95,20 +95,20 @@ index 299a469ce4..9caf6d9b04 100644
      /* various PCM "codecs" */
      {
 diff --git a/libavcodec/codec_id.h b/libavcodec/codec_id.h
-index ff2c21526c..1ef7f09137 100644
+index 841aa28..ad5c357 100644
 --- a/libavcodec/codec_id.h
 +++ b/libavcodec/codec_id.h
-@@ -324,6 +324,8 @@ enum AVCodecID {
-     AV_CODEC_ID_PRORES_RAW,
+@@ -325,6 +325,8 @@ enum AVCodecID {
      AV_CODEC_ID_JPEGXS,
      AV_CODEC_ID_WEBP_ANIM,
+     AV_CODEC_ID_ASTC,
 +    AV_CODEC_ID_PXL,
 +    AV_CODEC_ID_PXL_ANIM,
  
      /* various PCM "codecs" */
      AV_CODEC_ID_FIRST_AUDIO = 0x10000,     ///< A dummy id pointing at the start of audio codecs
 diff --git a/libavformat/Makefile b/libavformat/Makefile
-index 2f85e8a2ad..675e6188c2 100644
+index 3176be8..5e226cc 100644
 --- a/libavformat/Makefile
 +++ b/libavformat/Makefile
 @@ -126,6 +126,8 @@ OBJS-$(CONFIG_APM_DEMUXER)               += apm.o
@@ -121,7 +121,7 @@ index 2f85e8a2ad..675e6188c2 100644
  OBJS-$(CONFIG_APTX_MUXER)                += rawenc.o
  OBJS-$(CONFIG_APTX_HD_DEMUXER)           += aptxdec.o
 diff --git a/libavformat/allformats.c b/libavformat/allformats.c
-index e121c7441c..3820ba67f5 100644
+index 17dcc53..1318821 100644
 --- a/libavformat/allformats.c
 +++ b/libavformat/allformats.c
 @@ -68,6 +68,8 @@ extern const FFInputFormat  ff_apm_demuxer;
@@ -133,7 +133,7 @@ index e121c7441c..3820ba67f5 100644
  extern const FFInputFormat  ff_aptx_demuxer;
  extern const FFOutputFormat ff_aptx_muxer;
  extern const FFInputFormat  ff_aptx_hd_demuxer;
-@@ -567,6 +569,7 @@ extern const FFInputFormat  ff_image_pictor_pipe_demuxer;
+@@ -571,6 +573,7 @@ extern const FFInputFormat  ff_image_pictor_pipe_demuxer;
  extern const FFInputFormat  ff_image_png_pipe_demuxer;
  extern const FFInputFormat  ff_image_ppm_pipe_demuxer;
  extern const FFInputFormat  ff_image_psd_pipe_demuxer;
@@ -142,7 +142,7 @@ index e121c7441c..3820ba67f5 100644
  extern const FFInputFormat  ff_image_qoi_pipe_demuxer;
  extern const FFInputFormat  ff_image_sgi_pipe_demuxer;
 diff --git a/libavformat/img2.c b/libavformat/img2.c
-index 2c69a932da..5d4410ddf3 100644
+index 2c69a93..5d4410d 100644
 --- a/libavformat/img2.c
 +++ b/libavformat/img2.c
 @@ -94,6 +94,7 @@
@@ -154,7 +154,7 @@ index 2c69a932da..5d4410ddf3 100644
      TAG(WBMP,            wbmp     ) \
      TAG(NONE,                     )
 diff --git a/libavformat/img2dec.c b/libavformat/img2dec.c
-index d5718eff41..9172631c4a 100644
+index d5718ef..9172631 100644
 --- a/libavformat/img2dec.c
 +++ b/libavformat/img2dec.c
 @@ -1159,6 +1159,30 @@ static int qoi_probe(const AVProbeData *p)
@@ -197,7 +197,7 @@ index d5718eff41..9172631c4a 100644
  IMAGEAUTO_DEMUXER(qoi,       QOI)
  IMAGEAUTO_DEMUXER(sgi,       SGI)
 diff --git a/libavformat/img2enc.c b/libavformat/img2enc.c
-index 1296da8ec7..38507f81c5 100644
+index 1296da8..38507f8 100644
 --- a/libavformat/img2enc.c
 +++ b/libavformat/img2enc.c
 @@ -395,7 +395,7 @@ const FFOutputFormat ff_image2_muxer = {

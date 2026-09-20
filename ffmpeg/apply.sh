@@ -29,7 +29,7 @@ cp "$here/libavformat/apxldec.c"  "$here/libavformat/apxlenc.c"  "$ff/libavforma
 git -C "$ff" apply --check "$here/0001-register-pxl-in-ffmpeg.patch" 2>/dev/null ||
     patch -d "$ff" -p1 --dry-run < "$here/0001-register-pxl-in-ffmpeg.patch" >/dev/null || {
         echo "error: the registration patch does not apply cleanly to $ff" >&2
-        echo "       (it was generated against FFmpeg 8.0.git 2a06abd2d7)" >&2
+        echo "       (it was generated against FFmpeg 8.0.git a50d8c7)" >&2
         exit 1
     }
 
