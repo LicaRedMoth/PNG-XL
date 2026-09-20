@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.png" alt="PXL" width="420"></p>
+
 # PXL — PNG XL
 
 A small lossless image format and library: PNG's per-row filters feeding
