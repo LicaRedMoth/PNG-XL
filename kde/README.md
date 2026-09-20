@@ -85,6 +85,35 @@ sudo update-mime-database /usr/share/mime
 After that, Gwenview and Dolphin pick up `.pxl`/`.apxl` for every user on the
 machine without any environment variables.
 
+## If Gwenview works but Dolphin still shows no thumbnail
+
+Bitten by this twice now (2026-07-26 and again 2026-09-20), so it gets its
+own heading instead of staying a tribal-knowledge fix: `kimg_pxl` and
+`pxlthumbnail` are registered with KDE's service system
+(`kbuildsycoca6`/mime database) as soon as they are installed and the mime
+type + `.so` are in place -- but Dolphin *also* keeps its own separate,
+per-user opt-in list of which preview plugins it will actually call, in
+`~/.config/dolphinrc`:
+
+```ini
+[PreviewSettings]
+Plugins=imagethumbnail,jpegthumbnail,...
+```
+
+A plugin installed after that list was last written (which is most of the
+time -- KDE seeds it once, from whatever preview plugins existed when
+Dolphin first ran) is simply never invoked, no matter how correctly it is
+built and registered. There is no error for this: Dolphin falls back to the
+generic file-type icon exactly as if the plugin were broken, which is
+indistinguishable from an actual decode bug without checking this file.
+
+Fix: add `pxlthumbnail` to that comma-separated list (Dolphin's own Settings
+-> Configure Dolphin -> General -> Previews does this too, if `pxlthumbnail`
+already shows up there as an option -- it may not, until sycoca has been
+rebuilt with the plugin present), then **fully quit and relaunch Dolphin**,
+not just refresh (F5) the current window -- the enabled-plugins list is read
+once at startup.
+
 ## Verifying decoding is correct
 
 `magick`/ImageMagick does not load Qt image plugins, so verification needs a
