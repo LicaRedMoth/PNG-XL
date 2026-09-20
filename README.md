@@ -1,4 +1,5 @@
 <p align="center"><img src="logo.png" alt="PXL" width="420"></p>
+<p align="center"><sub>This logo, losslessly: <a href="logo.png">288-byte PNG</a> → <a href="logo.pxl"><b>109-byte PXL</b></a> (37.8%, <code>-l 22</code>).</sub></p>
 
 # PXL — PNG XL
 

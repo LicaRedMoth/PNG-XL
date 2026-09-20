@@ -12,11 +12,13 @@
 *.so
 # Scratch encodes from development. The committed reference files under
 # tests/data/ are exceptions: the suite decodes them to prove an older
-# encoder's output still reads correctly.
+# encoder's output still reads correctly. logo.pxl is a deliberate example
+# asset (README's logo, losslessly re-encoded), not a test fixture.
 *.pxl
 *.apxl
 !tests/data/*.pxl
 !tests/data/*.apxl
+!logo.pxl
 pxl_interop_tmp.png
 
 # Reference implementations / vendored upstreams (own repos, not part of our build)
