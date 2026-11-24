@@ -1,5 +1,5 @@
 {
   "libpng": "1.6.59",
-  "zstd": "1.5.7",
+  "zstd": "1.6.0",
   "ffmpeg_verified": "a50d8c7"
 }
